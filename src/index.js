@@ -3,6 +3,7 @@ import { ensureInitialSnapshot, fetchTokenPrices } from "./core/balanceTracker.j
 import "./core/db.js"; // trigger schema init
 import { getActive as getActiveTokens } from "./core/tokenRegistry.js";
 import { loadWallets } from "./core/wallets.js";
+import { startVirtualsDiscovery, stopVirtualsDiscovery } from "./discovery/virtuals.js";
 import { notifyInfo, startBatchTimer } from "./notify/telegram.js";
 import { startWalletLoop } from "./orchestrator.js";
 import { logger } from "./util/logger.js";
@@ -62,9 +63,11 @@ async function main() {
 
   setInterval(() => logger.info(snapshot(), "metrics snapshot"), METRICS_LOG_INTERVAL_MS);
   startBatchTimer();
+  startVirtualsDiscovery();
 
   const shutdown = async (sig) => {
     logger.info({ sig }, "shutdown signal — exiting");
+    stopVirtualsDiscovery();
     if (config.telegram.enabled) {
       try { await notifyInfo(`wallet-ager shutting down (${sig})`); } catch {}
     }
