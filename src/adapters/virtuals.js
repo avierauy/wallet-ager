@@ -1,6 +1,7 @@
 import { concat, encodeFunctionData, erc20Abi, parseAbi } from "viem";
 import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
+import { notifyApproval } from "../notify/telegram.js";
 import { waitForAllowance } from "../util/waitForAllowance.js";
 import * as uniswap from "./uniswap.js";
 
@@ -123,6 +124,7 @@ export const quoteAgentToVirtual = ({ agentToken, amountInAgentWei }) =>
 //   4. BondingV5.buy.
 export const executeBuyFlow = async ({ wallet, agentToken, plannedAmountInWei, slippageBps }) => {
   const account = wallet.account;
+  const agentTokenAddress = typeof agentToken === "string" ? agentToken : agentToken.address;
 
   let virtualBalance = await readVirtualBalance(account);
   let acquisition = null;
@@ -157,14 +159,24 @@ export const executeBuyFlow = async ({ wallet, agentToken, plannedAmountInWei, s
       spender: PRE_GRAD_SPENDER(),
       atLeast: virtualBalance,
     });
+    notifyApproval({
+      walletId: wallet.id,
+      tokenSymbol: "VIRTUAL",
+      decimals: 18,
+      amountWei: virtualBalance,
+      spender: PRE_GRAD_SPENDER(),
+      spenderLabel: "Virtuals FRouter",
+      txHash: approveTx,
+      explorer: config.chain.blockExplorer,
+    });
   }
 
-  const expectedOut = await quoteVirtualToAgent({ agentToken, amountInVirtualWei: virtualBalance });
+  const expectedOut = await quoteVirtualToAgent({ agentToken: agentTokenAddress, amountInVirtualWei: virtualBalance });
   const minOut = applySlippage(expectedOut, slippageBps);
 
   const buyTx = await buyPreGrad({
     account,
-    agentToken,
+    agentToken: agentTokenAddress,
     amountInVirtualWei: virtualBalance,
     minOutWei: minOut,
   });
@@ -182,24 +194,37 @@ export const executeBuyFlow = async ({ wallet, agentToken, plannedAmountInWei, s
 // future Virtuals buys (per user spec).
 export const executeSellFlow = async ({ wallet, agentToken, amountInWei, slippageBps }) => {
   const account = wallet.account;
+  const agentTokenAddress = typeof agentToken === "string" ? agentToken : agentToken.address;
+  const agentTokenSymbol = typeof agentToken === "string" ? null : agentToken.symbol;
+  const agentTokenDecimals = typeof agentToken === "string" ? 18 : agentToken.decimals;
 
-  const approveTx = await approveForPreGrad({ account, token: agentToken, amount: amountInWei });
+  const approveTx = await approveForPreGrad({ account, token: agentTokenAddress, amount: amountInWei });
   if (approveTx) {
     await publicClient.waitForTransactionReceipt({ hash: approveTx });
     await waitForAllowance({
       owner: account.address,
-      token: agentToken,
+      token: agentTokenAddress,
       spender: PRE_GRAD_SPENDER(),
       atLeast: amountInWei,
     });
+    notifyApproval({
+      walletId: wallet.id,
+      tokenSymbol: agentTokenSymbol ?? agentTokenAddress.slice(0, 8),
+      decimals: agentTokenDecimals,
+      amountWei: amountInWei,
+      spender: PRE_GRAD_SPENDER(),
+      spenderLabel: "Virtuals FRouter",
+      txHash: approveTx,
+      explorer: config.chain.blockExplorer,
+    });
   }
 
-  const expectedOut = await quoteAgentToVirtual({ agentToken, amountInAgentWei: amountInWei });
+  const expectedOut = await quoteAgentToVirtual({ agentToken: agentTokenAddress, amountInAgentWei: amountInWei });
   const minOut = applySlippage(expectedOut, slippageBps);
 
   const sellTx = await sellPreGrad({
     account,
-    agentToken,
+    agentToken: agentTokenAddress,
     amountInWei,
     minOutVirtualWei: minOut,
   });

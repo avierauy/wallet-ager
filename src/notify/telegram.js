@@ -83,5 +83,38 @@ export const notifyError = ({ walletId, dex, error }) =>
     ].join("\n")
   );
 
+// notifyApproval — ERC20 approval event. `amountWei == null` is treated as unlimited (e.g.
+// Permit2 one-time MAX approval). `spenderLabel` is a friendly name to disambiguate the
+// spender address (e.g. "Permit2", "Virtuals FRouter").
+export const notifyApproval = ({
+  walletId,
+  tokenSymbol,
+  decimals,
+  amountWei,
+  spender,
+  spenderLabel,
+  txHash,
+  explorer,
+}) => {
+  const amountText = amountWei == null ? "unlimited" : `${fmt(amountWei, decimals)} ${tokenSymbol}`;
+  const shortSpender = spender ? `${spender.slice(0, 6)}…${spender.slice(-4)}` : "?";
+  const spenderText = spenderLabel ? `${spenderLabel} (${shortSpender})` : shortSpender;
+
+  const lines = [
+    `*APPROVE* ${escapeMd(tokenSymbol)}`,
+    `wallet:  \`${escapeMd(walletId)}\``,
+    `amount:  ${escapeMd(amountText)}`,
+    `spender: ${escapeMd(spenderText)}`,
+  ];
+  if (txHash) {
+    const short = `${txHash.slice(0, 10)}…${txHash.slice(-6)}`;
+    lines.push(`hash:    \`${escapeMd(short)}\``);
+    if (explorer) {
+      lines.push(`[Open on ${escapeMd(explorerLabel(explorer))} ↗](${explorer}/tx/${txHash})`);
+    }
+  }
+  return send(lines.join("\n"));
+};
+
 // Arbitrary informational text (boot, shutdown, periodic summary). Auto-escaped for MarkdownV2.
 export const notifyInfo = (text) => send(escapeMd(text));

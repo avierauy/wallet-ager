@@ -2,7 +2,7 @@ import * as bankr from "../adapters/bankr.js";
 import * as uniswap from "../adapters/uniswap.js";
 import * as virtuals from "../adapters/virtuals.js";
 import { config } from "../config.js";
-import { notifyError, notifyTrade } from "../notify/telegram.js";
+import { notifyApproval, notifyError, notifyTrade } from "../notify/telegram.js";
 import { checkBeforeSell, checkToken } from "../safety/honeypot.js";
 import { checkBondingCurve } from "../safety/virtuals.js";
 import { logger } from "../util/logger.js";
@@ -19,23 +19,33 @@ const VIRTUAL_LEG = (amountWei) => ({ symbol: "VIRTUAL", decimals: 18, amountWei
 const TOKEN_LEG = (token, amountWei) => ({ symbol: token.symbol, decimals: token.decimals, amountWei });
 
 const ensurePermit2Approval = async ({ wallet, token }) => {
-  if (hasApproval({ wallet_id: wallet.id, token, spender: config.chain.permit2 })) return;
-  const hash = await uniswap.approveTokenToPermit2({ account: wallet.account, token });
+  if (hasApproval({ wallet_id: wallet.id, token: token.address, spender: config.chain.permit2 })) return;
+  const hash = await uniswap.approveTokenToPermit2({ account: wallet.account, token: token.address });
   if (hash) {
     await publicClient.waitForTransactionReceipt({ hash });
     // Guard the subsequent sell against RPC state staleness — any large allowance is fine here.
     await waitForAllowance({
       owner: wallet.account.address,
-      token,
+      token: token.address,
       spender: config.chain.permit2,
       atLeast: 2n ** 128n,
     });
     recordApproval({
       wallet_id: wallet.id,
-      token,
+      token: token.address,
       spender: config.chain.permit2,
       tx_hash: hash,
       granted_at: Date.now(),
+    });
+    notifyApproval({
+      walletId: wallet.id,
+      tokenSymbol: token.symbol,
+      decimals: token.decimals,
+      amountWei: null, // Permit2 one-time MAX → display as "unlimited"
+      spender: config.chain.permit2,
+      spenderLabel: "Permit2",
+      txHash: hash,
+      explorer: config.chain.blockExplorer,
     });
   }
 };
@@ -67,7 +77,7 @@ const dispatch = async ({ wallet, plan }) => {
         out: quoteToLeg(r.route, plan.token.symbol, plan.token.decimals),
       };
     }
-    await ensurePermit2Approval({ wallet, token: plan.token.address });
+    await ensurePermit2Approval({ wallet, token: plan.token });
     const r = await uniswap.sellExactTokenForEth({
       account: wallet.account,
       tokenIn: plan.token,
@@ -102,7 +112,7 @@ const dispatch = async ({ wallet, plan }) => {
     if (plan.side === "buy") {
       const r = await virtuals.executeBuyFlow({
         wallet,
-        agentToken: plan.token.address,
+        agentToken: plan.token,
         plannedAmountInWei: plan.amountInWei,
         slippageBps: plan.slippageBps,
       });
@@ -117,7 +127,7 @@ const dispatch = async ({ wallet, plan }) => {
     }
     const r = await virtuals.executeSellFlow({
       wallet,
-      agentToken: plan.token.address,
+      agentToken: plan.token,
       amountInWei: plan.amountInWei,
       slippageBps: plan.slippageBps,
     });
