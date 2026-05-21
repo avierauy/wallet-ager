@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.test
+.env.local
+data/
+config/wallets.json
+config/tokens.json
+*.log
+.DS_Store
+.claude/

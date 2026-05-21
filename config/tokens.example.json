@@ -1,0 +1,30 @@
+{
+  "tokens": [
+    {
+      "address": "0xa4a2e2ca3fbfe21aed83471d28b6f65a233c6e00",
+      "symbol": "TIBBIR",
+      "decimals": 18,
+      "tradeableOn": ["uniswap", "virtuals"],
+      "virtualsState": "post-graduation"
+    },
+    {
+      "address": "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b",
+      "symbol": "VIRTUAL",
+      "decimals": 18,
+      "tradeableOn": ["uniswap"]
+    },
+    {
+      "address": "0x479e864957dbb19f780c37ac7f7e3bfbba23c45a",
+      "symbol": "POLYHERMES",
+      "decimals": 18,
+      "tradeableOn": ["virtuals"],
+      "virtualsState": "pre-graduation"
+    },
+    {
+      "address": "0x7c5290cae29659fe87f57d41234a5b68de237ba3",
+      "symbol": "EKIDEN",
+      "decimals": 18,
+      "tradeableOn": ["bankr", "uniswap"]
+    }
+  ]
+}

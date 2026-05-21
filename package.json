@@ -1,0 +1,33 @@
+{
+  "name": "wallet-ager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node --env-file=.env src/index.js",
+    "dry-run": "node --env-file=.env src/index.js --dry-run",
+    "check": "node --env-file=.env scripts/check-imports.js",
+    "metrics": "node --env-file=.env scripts/metrics.js",
+    "balances": "node --env-file=.env scripts/balances.js",
+    "telegram-test": "node --env-file=.env scripts/telegram-test.js",
+    "smoke": "node --env-file=.env scripts/smoke.js",
+    "test": "node --env-file=.env.test --test",
+    "test:unit": "node --env-file=.env.test --test \"test/unit/**/*.test.js\"",
+    "test:e2e": "node --env-file=.env.test --test \"test/e2e/**/*.test.js\""
+  },
+  "dependencies": {
+    "@uniswap/sdk-core": "^7.14.0",
+    "@uniswap/smart-order-router": "^4.31.10",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.7",
+    "ethers": "^5.8.0",
+    "pino": "^9.5.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "pino-pretty": "^11.3.0"
+  }
+}

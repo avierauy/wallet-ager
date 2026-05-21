@@ -1,0 +1,33 @@
+{
+  "chainId": 8453,
+  "name": "base",
+  "nativeSymbol": "ETH",
+  "nativeSentinel": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "wnative": "0x4200000000000000000000000000000000000006",
+  "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+  "blockExplorer": "https://basescan.org",
+  "dexes": {
+    "uniswap": {
+      "kind": "uniswap-universal-router",
+      "universalRouter": "0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7",
+      "quoterV2": "0x3d4e44eb1374240ce5f1b871ab261cd16335b76a",
+      "defaultFeeTier": 3000,
+      "interfaceFeeBps": 25,
+      "interfaceFeeRecipient": null
+    },
+    "bankr": {
+      "kind": "zeroex-allowance-holder",
+      "settler": "0x0000000000001ff3684f28c67538d4d072c22734",
+      "apiBase": "https://api.0x.org/swap/allowance-holder"
+    },
+    "virtuals": {
+      "kind": "virtuals",
+      "preGradRouter": "0x1a540088125d00dd3990f9da45ca0859af4d3b01",
+      "postGradRouter": "0xc8f6b8ba0dc0f175b568b99440b0867f69a29265",
+      "preGradApproveSpender": "0x02fe8ec3d9bbf7318eb54590bcc39198a8b47ded",
+      "postGradApproveSpender": "0x57df6092665eb6058de53939612413ff4b09114e",
+      "virtualToken": "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b",
+      "frontendMarker": "0x62635f7a677a65663138360b0080218021802180218021802180218021"
+    }
+  }
+}

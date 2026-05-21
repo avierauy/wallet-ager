@@ -1,0 +1,43 @@
+{
+  "profiles": {
+    "default": {
+      "activeHoursUtc": [10, 23],
+      "tradesPerDay": [3, 5],
+      "amountRangeNativeEth": [0.0005, 0.003],
+      "gasMultiplierRange": [1.0, 1.4],
+      "slippageBps": [50, 150],
+      "dexWeights": { "uniswap": 50, "bankr": 30, "virtuals": 20 },
+      "minNativeBalanceWei": "5000000000000000"
+    },
+    "night-owl": {
+      "activeHoursUtc": [22, 6],
+      "tradesPerDay": [2, 4],
+      "amountRangeNativeEth": [0.001, 0.005],
+      "gasMultiplierRange": [1.1, 1.6],
+      "slippageBps": [30, 100],
+      "dexWeights": { "uniswap": 20, "bankr": 60, "virtuals": 20 },
+      "minNativeBalanceWei": "5000000000000000"
+    },
+    "aggressive": {
+      "activeHoursUtc": [0, 24],
+      "tradesPerDay": [5, 10],
+      "amountRangeNativeEth": [0.002, 0.01],
+      "gasMultiplierRange": [1.2, 2.0],
+      "slippageBps": [100, 300],
+      "dexWeights": { "uniswap": 70, "bankr": 20, "virtuals": 10 },
+      "minNativeBalanceWei": "10000000000000000"
+    }
+  },
+  "wallets": [
+    "0x0000000000000000000000000000000000000000000000000000000000000001",
+    "0x0000000000000000000000000000000000000000000000000000000000000002",
+    "0x0000000000000000000000000000000000000000000000000000000000000003",
+    { "privateKey": "0x0000000000000000000000000000000000000000000000000000000000000004", "profile": "night-owl" },
+    { "privateKey": "0x0000000000000000000000000000000000000000000000000000000000000005", "profile": "aggressive", "id": "vip-001" },
+    {
+      "privateKey": "0x0000000000000000000000000000000000000000000000000000000000000006",
+      "profile": "default",
+      "overrides": { "tradesPerDay": [8, 12], "slippageBps": [200, 400] }
+    }
+  ]
+}

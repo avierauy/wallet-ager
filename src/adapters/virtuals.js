@@ -1,0 +1,193 @@
+import { concat, encodeFunctionData, erc20Abi, parseAbi } from "viem";
+import { config } from "../config.js";
+import { publicClient, walletClientFor } from "../core/rpc.js";
+import * as uniswap from "./uniswap.js";
+
+const BONDING_ABI = parseAbi([
+  "function buy(uint256 amountIn, address token, uint256 minAmountOut, uint256 deadline)",
+  "function sell(uint256 amountIn, address token, uint256 minAmountOut, uint256 deadline)",
+]);
+
+// FRouterV3.getAmountsOut(token, assetToken_, amountIn):
+//   - When assetToken_ == VIRTUAL → BUY direction: amountIn is VIRTUAL, returns expected agent
+//   - When assetToken_ == agentToken → SELL direction: amountIn is agent, returns expected VIRTUAL
+// Source: BaseScan-verified FRouterV3 at 0x42ea980e773ff5b18cc1c56f2f6db8bf47d55e32.
+const FROUTER_ABI = parseAbi([
+  "function getAmountsOut(address token, address assetToken_, uint256 amountIn) view returns (uint256)",
+]);
+
+const PRE_GRAD_ROUTER = () => config.chain.dexes.virtuals.preGradRouter;
+const PRE_GRAD_SPENDER = () => config.chain.dexes.virtuals.preGradApproveSpender;
+const VIRTUAL_TOKEN = () => config.chain.dexes.virtuals.virtualToken;
+const MARKER = () => config.chain.dexes.virtuals.frontendMarker;
+
+// Below this many wei of VIRTUAL the wallet is considered to have none.
+const VIRTUAL_DUST_WEI = 10n ** 15n; // 0.001 VIRTUAL
+
+const applySlippage = (amount, bps) => (amount * BigInt(10000 - bps)) / 10000n;
+
+const appendMarker = (data) => (MARKER() ? concat([data, MARKER()]) : data);
+
+// ---- PURE DATA BUILDERS (testable, no network) ----
+
+export const buildApprovePreGradData = ({ amount }) =>
+  appendMarker(
+    encodeFunctionData({
+      abi: erc20Abi,
+      functionName: "approve",
+      args: [PRE_GRAD_SPENDER(), amount],
+    })
+  );
+
+export const buildBuyPreGradData = ({ agentToken, amountInVirtualWei, minOutWei, deadline }) =>
+  appendMarker(
+    encodeFunctionData({
+      abi: BONDING_ABI,
+      functionName: "buy",
+      args: [amountInVirtualWei, agentToken, minOutWei, deadline],
+    })
+  );
+
+export const buildSellPreGradData = ({ agentToken, amountInWei, minOutVirtualWei, deadline }) =>
+  appendMarker(
+    encodeFunctionData({
+      abi: BONDING_ABI,
+      functionName: "sell",
+      args: [amountInWei, agentToken, minOutVirtualWei, deadline],
+    })
+  );
+
+// ---- HIGH-LEVEL ----
+
+export const approveForPreGrad = async ({ account, token, amount }) => {
+  const wallet = walletClientFor(account);
+  const current = await publicClient.readContract({
+    address: token,
+    abi: erc20Abi,
+    functionName: "allowance",
+    args: [account.address, PRE_GRAD_SPENDER()],
+  });
+  if (current >= amount) return null;
+  return wallet.sendTransaction({ to: token, data: buildApprovePreGradData({ amount }) });
+};
+
+export const buyPreGrad = async ({ account, agentToken, amountInVirtualWei, minOutWei, deadlineSecs = 600 }) => {
+  const wallet = walletClientFor(account);
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSecs);
+  const data = buildBuyPreGradData({ agentToken, amountInVirtualWei, minOutWei, deadline });
+  return wallet.sendTransaction({ to: PRE_GRAD_ROUTER(), data });
+};
+
+export const sellPreGrad = async ({ account, agentToken, amountInWei, minOutVirtualWei, deadlineSecs = 600 }) => {
+  const wallet = walletClientFor(account);
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSecs);
+  const data = buildSellPreGradData({ agentToken, amountInWei, minOutVirtualWei, deadline });
+  return wallet.sendTransaction({ to: PRE_GRAD_ROUTER(), data });
+};
+
+// ---- READ HELPERS ----
+
+export const readVirtualBalance = (account) =>
+  publicClient.readContract({
+    address: VIRTUAL_TOKEN(),
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: [account.address],
+  });
+
+export const quoteVirtualToAgent = ({ agentToken, amountInVirtualWei }) =>
+  publicClient.readContract({
+    address: PRE_GRAD_SPENDER(),
+    abi: FROUTER_ABI,
+    functionName: "getAmountsOut",
+    args: [agentToken, VIRTUAL_TOKEN(), amountInVirtualWei],
+  });
+
+export const quoteAgentToVirtual = ({ agentToken, amountInAgentWei }) =>
+  publicClient.readContract({
+    address: PRE_GRAD_SPENDER(),
+    abi: FROUTER_ABI,
+    functionName: "getAmountsOut",
+    args: [agentToken, agentToken, amountInAgentWei],
+  });
+
+// ---- FULL FLOWS (chain multiple txs, wait for each receipt) ----
+
+// Buy flow:
+//   1. If wallet has VIRTUAL above dust → use ALL of it; no Uniswap step (per user's spec: reuse
+//      VIRTUAL accumulated from prior sells, don't buy more).
+//   2. If wallet has no/dust VIRTUAL → Uniswap ETH→VIRTUAL with the planned ETH amount, then use
+//      the resulting VIRTUAL balance.
+//   3. Approve exact-amount to FRouter (matches UI footprint, marker appended).
+//   4. BondingV5.buy.
+export const executeBuyFlow = async ({ wallet, agentToken, plannedAmountInWei, slippageBps }) => {
+  const account = wallet.account;
+
+  let virtualBalance = await readVirtualBalance(account);
+  let acquisition = null;
+
+  if (virtualBalance < VIRTUAL_DUST_WEI) {
+    const uniRes = await uniswap.buyExactEthForToken({
+      account,
+      tokenOut: { address: VIRTUAL_TOKEN(), decimals: 18, symbol: "VIRTUAL" },
+      amountInWei: plannedAmountInWei,
+      slippageBps,
+    });
+    await publicClient.waitForTransactionReceipt({ hash: uniRes.txHash });
+    virtualBalance = await readVirtualBalance(account);
+    acquisition = { txHash: uniRes.txHash, virtualAcquiredWei: virtualBalance.toString() };
+    if (virtualBalance < VIRTUAL_DUST_WEI) {
+      throw new Error("VIRTUAL acquisition via Uniswap produced negligible balance");
+    }
+  }
+
+  const approveTx = await approveForPreGrad({
+    account,
+    token: VIRTUAL_TOKEN(),
+    amount: virtualBalance,
+  });
+  if (approveTx) await publicClient.waitForTransactionReceipt({ hash: approveTx });
+
+  const expectedOut = await quoteVirtualToAgent({ agentToken, amountInVirtualWei: virtualBalance });
+  const minOut = applySlippage(expectedOut, slippageBps);
+
+  const buyTx = await buyPreGrad({
+    account,
+    agentToken,
+    amountInVirtualWei: virtualBalance,
+    minOutWei: minOut,
+  });
+
+  return {
+    txHash: buyTx,
+    acquisition,
+    virtualSpentWei: virtualBalance.toString(),
+    expectedAgentOutWei: expectedOut.toString(),
+    minAgentOutWei: minOut.toString(),
+  };
+};
+
+// Sell flow: approve agent token → BondingV5.sell. Resulting VIRTUAL stays in the wallet for
+// future Virtuals buys (per user spec).
+export const executeSellFlow = async ({ wallet, agentToken, amountInWei, slippageBps }) => {
+  const account = wallet.account;
+
+  const approveTx = await approveForPreGrad({ account, token: agentToken, amount: amountInWei });
+  if (approveTx) await publicClient.waitForTransactionReceipt({ hash: approveTx });
+
+  const expectedOut = await quoteAgentToVirtual({ agentToken, amountInAgentWei: amountInWei });
+  const minOut = applySlippage(expectedOut, slippageBps);
+
+  const sellTx = await sellPreGrad({
+    account,
+    agentToken,
+    amountInWei,
+    minOutVirtualWei: minOut,
+  });
+
+  return {
+    txHash: sellTx,
+    expectedVirtualOutWei: expectedOut.toString(),
+    minVirtualOutWei: minOut.toString(),
+  };
+};
