@@ -7,6 +7,7 @@ import { checkBeforeSell, checkToken } from "../safety/honeypot.js";
 import { checkBondingCurve } from "../safety/virtuals.js";
 import { logger } from "../util/logger.js";
 import { inc } from "../util/metrics.js";
+import { withRetry } from "../util/retry.js";
 import { hasApproval, insertTrade, recordApproval, updateTrade } from "./db.js";
 import { withWalletLock } from "./nonceManager.js";
 
@@ -172,7 +173,27 @@ export const executeAction = async ({ wallet, plan }) => {
   }
 
   try {
-    const dispatched = await withWalletLock(wallet.account, () => dispatch({ wallet, plan }));
+    // Retry the adapter flow on transient errors (allowance race after a just-confirmed approve,
+    // nonce desync, RPC 5xx, etc.). Adapters are idempotent — they re-check allowance and re-quote
+    // — so re-running the whole dispatch is safe and refreshes stale state.
+    const dispatched = await withWalletLock(wallet.account, () =>
+      withRetry(() => dispatch({ wallet, plan }), {
+        onRetry: ({ attempt, err, nextDelayMs }) => {
+          logger.warn(
+            {
+              walletId: wallet.id,
+              dex: plan.dex,
+              side: plan.side,
+              attempt,
+              nextDelayMs,
+              msg: String(err.shortMessage ?? err.message ?? err).slice(0, 200),
+            },
+            "transient dispatch error — retrying"
+          );
+          inc("trade-retry", { dex: plan.dex, side: plan.side });
+        },
+      })
+    );
     updateTrade(tradeId, { status: "submitted", tx_hash: dispatched.txHash });
     inc("trade", { status: "submitted", dex: plan.dex, side: plan.side });
     notifyTrade({
