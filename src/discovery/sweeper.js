@@ -15,6 +15,7 @@ import {
   refreshSafetyChecked,
   STATUS,
 } from "../core/tokenRegistry.js";
+import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { checkBondingCurve, checkToken } from "../safety/index.js";
 import { logger } from "../util/logger.js";
 import { inc } from "../util/metrics.js";
@@ -93,6 +94,14 @@ export const sweepOnce = async ({ now = Date.now(), ttlHours = config.discovery.
         });
         markedActive++;
         inc("discovery-sweep", { outcome: "promoted-active" });
+        // Fire sniper on promotions — this is the second main entry point besides initial
+        // discovery. Subgraph lag means most fresh launches enter via this path, not the first.
+        tryFireSniperBuy({
+          token: {
+            address: token.address, symbol: token.symbol, decimals: token.decimals,
+            tradeableOn: token.tradeableOn,
+          },
+        }).catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
       } else {
         refreshSafetyChecked({ address: token.address });
         rechecked++;

@@ -9,6 +9,7 @@ import { startUniswapDiscovery, stopUniswapDiscovery } from "./discovery/uniswap
 import { startVirtualsDiscovery, stopVirtualsDiscovery } from "./discovery/virtuals.js";
 import { notifyInfo, startBatchTimer } from "./notify/telegram.js";
 import { startWalletLoop } from "./orchestrator.js";
+import { initSniper, _stopAll as stopSniper } from "./orchestrator/sniper.js";
 import { logger } from "./util/logger.js";
 import { snapshot } from "./util/metrics.js";
 import { createSemaphore } from "./util/semaphore.js";
@@ -60,6 +61,8 @@ async function main() {
     );
   }
 
+  initSniper(wallets);
+
   for (const wallet of wallets) {
     startWalletLoop({ wallet });
   }
@@ -77,6 +80,7 @@ async function main() {
     stopUniswapDiscovery();
     stopBankrDiscovery();
     stopSweeper();
+    stopSniper();
     if (config.telegram.enabled) {
       try { await notifyInfo(`wallet-ager shutting down (${sig})`); } catch {}
     }

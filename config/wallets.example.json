@@ -7,7 +7,14 @@
       "gasMultiplierRange": [1.0, 1.4],
       "slippageBps": [50, 150],
       "dexWeights": { "uniswap": 50, "bankr": 30, "virtuals": 20 },
-      "minNativeBalanceWei": "5000000000000000"
+      "minNativeBalanceWei": "5000000000000000",
+      "sniper": {
+        "enabled": true,
+        "cooldownMin": 3,
+        "sellDelayMin": [5, 45],
+        "amountRangeNativeEth": [0.0008, 0.003],
+        "sellSlippageBps": 300
+      }
     },
     "night-owl": {
       "activeHoursUtc": [22, 6],

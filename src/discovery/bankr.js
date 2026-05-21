@@ -9,6 +9,7 @@ import { parseAbiItem, parseAbi } from "viem";
 import { config } from "../config.js";
 import { publicClient } from "../core/rpc.js";
 import { add, STATUS } from "../core/tokenRegistry.js";
+import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { checkToken } from "../safety/index.js";
 import { logger } from "../util/logger.js";
 import { tokenHasExistingPools } from "./poolExistence.js";
@@ -81,6 +82,13 @@ export const handleAirlockCreate = async ({ asset, numeraire, initializer, poolO
     { asset, symbol: meta.symbol, status, initializer, poolOrHook },
     "bankr/airlock: discovery resolved"
   );
+
+  if (status === STATUS.ACTIVE) {
+    tryFireSniperBuy({
+      token: { address: asset, symbol: meta.symbol, decimals: meta.decimals, tradeableOn: ["uniswap"] },
+    }).catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
+  }
+
   return { added: true, status, initializer, poolOrHook };
 };
 

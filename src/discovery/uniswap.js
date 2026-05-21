@@ -17,6 +17,7 @@ import { parseAbi, parseAbiItem } from "viem";
 import { config } from "../config.js";
 import { publicClient } from "../core/rpc.js";
 import { add, STATUS } from "../core/tokenRegistry.js";
+import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { checkToken } from "../safety/index.js";
 import { logger } from "../util/logger.js";
 import { tokenHasExistingPools } from "./poolExistence.js";
@@ -122,6 +123,14 @@ const registerIfFirstAndSafe = async ({ tokenAddr, source, excludePool, extra = 
     status,
   });
   logger.info({ token: tokenAddr, symbol: meta.symbol, source, status, ...extra }, "uniswap: discovery resolved");
+
+  // Fresh launch + safety verdict came back SAFE → fire sniper buy immediately.
+  if (status === STATUS.ACTIVE) {
+    tryFireSniperBuy({
+      token: { address: tokenAddr, symbol: meta.symbol, decimals: meta.decimals, tradeableOn: ["uniswap"] },
+    }).catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
+  }
+
   return { added: true, status };
 };
 

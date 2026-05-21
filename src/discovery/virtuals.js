@@ -3,6 +3,7 @@ import { parseAbi } from "viem";
 import { config } from "../config.js";
 import { publicClient } from "../core/rpc.js";
 import { add, markExpired, STATUS } from "../core/tokenRegistry.js";
+import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { checkBondingCurve } from "../safety/virtuals.js";
 import { logger } from "../util/logger.js";
 
@@ -55,6 +56,13 @@ export const handleLaunched = async ({ token }) => {
     { token, symbol: meta.symbol, status, safetyReasons: safety.reasons },
     "virtuals: token discovery resolved"
   );
+
+  if (status === STATUS.ACTIVE) {
+    tryFireSniperBuy({
+      token: { address: token, symbol: meta.symbol, decimals: meta.decimals, tradeableOn: ["virtuals"] },
+    }).catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
+  }
+
   return { added: true, status, safety };
 };
 
