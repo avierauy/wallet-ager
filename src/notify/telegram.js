@@ -32,9 +32,41 @@ const send = async (text) => {
   }
 };
 
-const formatLeg = (leg) => {
-  if (!leg) return null;
-  return `${fmt(leg.amountWei, leg.decimals)} ${leg.symbol}`;
+// Batch counters — incremented on every event regardless of the per-type live toggle.
+// Reset each time startBatchTimer() fires its periodic summary.
+const eventCounts = { trades: 0, approves: 0, errors: 0 };
+
+const recordEvent = (type) => {
+  if (!config.telegram.batchSummaryMin) return;
+  eventCounts[type]++;
+};
+
+export const _getEventCounts = () => ({ ...eventCounts });
+export const _resetEventCounts = () => {
+  eventCounts.trades = 0;
+  eventCounts.approves = 0;
+  eventCounts.errors = 0;
+};
+
+// Pure: format the periodic summary text. Extracted so tests don't need timers.
+export const buildBatchMessage = (counts, intervalMin) =>
+  [
+    `*Summary* — last ${escapeMd(String(intervalMin))}min`,
+    `trades:   ${escapeMd(String(counts.trades))}`,
+    `approves: ${escapeMd(String(counts.approves))}`,
+    `errors:   ${escapeMd(String(counts.errors))}`,
+  ].join("\n");
+
+// Boot the periodic batch sender. Returns the interval handle (or null if disabled).
+export const startBatchTimer = () => {
+  const min = config.telegram.batchSummaryMin;
+  if (!min || !config.telegram.enabled) return null;
+  return setInterval(async () => {
+    const snapshot = _getEventCounts();
+    if (snapshot.trades === 0 && snapshot.approves === 0 && snapshot.errors === 0) return;
+    _resetEventCounts();
+    await send(buildBatchMessage(snapshot, min));
+  }, min * 60 * 1000);
 };
 
 // Derive a friendly explorer name from its URL. "https://basescan.org" → "Basescan".
@@ -47,8 +79,11 @@ const explorerLabel = (url) => {
   }
 };
 
-// notifyTrade — `in` and `out` are objects shaped like { symbol, decimals, amountWei }.
-// `out` is optional (some adapters don't return an expected output amount).
+const formatLeg = (leg) => {
+  if (!leg) return null;
+  return `${fmt(leg.amountWei, leg.decimals)} ${leg.symbol}`;
+};
+
 export const notifyTrade = ({
   walletId,
   dex,
@@ -58,6 +93,9 @@ export const notifyTrade = ({
   in: inLeg,
   out: outLeg,
 }) => {
+  recordEvent("trades");
+  if (!config.telegram.enabled || !config.telegram.notify.trades) return;
+
   const lines = [
     `*${escapeMd(side.toUpperCase())}* on *${escapeMd(dex)}*`,
     `wallet: \`${escapeMd(walletId)}\``,
@@ -74,18 +112,18 @@ export const notifyTrade = ({
   return send(lines.join("\n"));
 };
 
-export const notifyError = ({ walletId, dex, error }) =>
-  send(
+export const notifyError = ({ walletId, dex, error }) => {
+  recordEvent("errors");
+  if (!config.telegram.enabled || !config.telegram.notify.errors) return;
+  return send(
     [
       `*ERROR* on *${escapeMd(dex)}*`,
       `wallet: \`${escapeMd(walletId)}\``,
       `msg:    ${escapeMd(error)}`,
     ].join("\n")
   );
+};
 
-// notifyApproval — ERC20 approval event. `amountWei == null` is treated as unlimited (e.g.
-// Permit2 one-time MAX approval). `spenderLabel` is a friendly name to disambiguate the
-// spender address (e.g. "Permit2", "Virtuals FRouter").
 export const notifyApproval = ({
   walletId,
   tokenSymbol,
@@ -96,6 +134,9 @@ export const notifyApproval = ({
   txHash,
   explorer,
 }) => {
+  recordEvent("approves");
+  if (!config.telegram.enabled || !config.telegram.notify.approves) return;
+
   const amountText = amountWei == null ? "unlimited" : `${fmt(amountWei, decimals)} ${tokenSymbol}`;
   const shortSpender = spender ? `${spender.slice(0, 6)}…${spender.slice(-4)}` : "?";
   const spenderText = spenderLabel ? `${spenderLabel} (${shortSpender})` : shortSpender;
@@ -116,5 +157,9 @@ export const notifyApproval = ({
   return send(lines.join("\n"));
 };
 
-// Arbitrary informational text (boot, shutdown, periodic summary). Auto-escaped for MarkdownV2.
-export const notifyInfo = (text) => send(escapeMd(text));
+// notifyInfo — always live when telegram is enabled (boot, shutdown, batch summary header).
+// Not toggle-able by design: it carries operational events the operator should never miss.
+export const notifyInfo = (text) => {
+  if (!config.telegram.enabled) return;
+  return send(escapeMd(text));
+};

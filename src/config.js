@@ -10,6 +10,11 @@ const required = (key) => {
 
 const optional = (key, fallback = "") => process.env[key] ?? fallback;
 
+const parseBool = (val, fallback) => {
+  if (val === undefined || val === "") return fallback;
+  return val === "true" || val === "1" || val === "yes";
+};
+
 const readJson = (path) => JSON.parse(readFileSync(resolve(path), "utf8"));
 
 const chain = required("CHAIN");
@@ -32,6 +37,12 @@ export const config = {
     token: optional("TELEGRAM_BOT_TOKEN"),
     chatId: optional("TELEGRAM_CHAT_ID"),
     enabled: Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
+    notify: {
+      trades: parseBool(process.env.TELEGRAM_NOTIFY_TRADES, true),
+      approves: parseBool(process.env.TELEGRAM_NOTIFY_APPROVES, false),
+      errors: parseBool(process.env.TELEGRAM_NOTIFY_ERRORS, true),
+    },
+    batchSummaryMin: Number(optional("TELEGRAM_BATCH_SUMMARY_MIN", "0")),
   },
   log: {
     level: optional("LOG_LEVEL", "info"),

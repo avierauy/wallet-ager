@@ -3,7 +3,7 @@ import { ensureInitialSnapshot, fetchTokenPrices } from "./core/balanceTracker.j
 import "./core/db.js"; // trigger schema init
 import { loadTokens } from "./core/tokens.js";
 import { loadWallets } from "./core/wallets.js";
-import { notifyInfo } from "./notify/telegram.js";
+import { notifyInfo, startBatchTimer } from "./notify/telegram.js";
 import { startWalletLoop } from "./orchestrator.js";
 import { logger } from "./util/logger.js";
 import { snapshot } from "./util/metrics.js";
@@ -61,6 +61,7 @@ async function main() {
   }
 
   setInterval(() => logger.info(snapshot(), "metrics snapshot"), METRICS_LOG_INTERVAL_MS);
+  startBatchTimer();
 
   const shutdown = async (sig) => {
     logger.info({ sig }, "shutdown signal — exiting");
