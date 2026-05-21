@@ -19,8 +19,9 @@ import {
 //   { dex, side, token, amountInWei, slippageBps, gasMultiplier }
 //   For buys: amountInWei is ETH spent. For sells: amountInWei is token spent.
 
-const SELL_FRACTION_RANGE = [0.1, 0.7]; // sell 10-70% of holdings when selling
-const BUY_BIAS_WHEN_LOW = 0.85;         // 85% chance to buy if we have no balance
+// On every sell, sell the full balance — keeps the on-chain pattern cycling
+// (buy → buy → buy → sell-all → buy → …) and avoids dust accumulation.
+const BUY_BIAS_WHEN_LOW = 0.85; // 85% chance to buy if we have no balance
 
 const candidateTokensFor = (dex, tokens) =>
   tokens.filter((t) => Array.isArray(t.tradeableOn) && t.tradeableOn.includes(dex));
@@ -58,9 +59,7 @@ export const planAction = ({ profile, tokens, balances, nativeBalance, rng }) =>
     const usable = nativeBalance - minNative;
     if (amountInWei > usable) amountInWei = usable;
   } else {
-    const bal = balances[token.address.toLowerCase()];
-    const frac = sampleUniform(SELL_FRACTION_RANGE, rng);
-    amountInWei = (bal * BigInt(Math.floor(frac * 10_000))) / 10_000n;
+    amountInWei = balances[token.address.toLowerCase()];
     if (amountInWei <= 0n) return null;
   }
 

@@ -95,7 +95,7 @@ describe("planAction", () => {
     }
   });
 
-  test("sell amount is a fraction (≤70%) of held balance", () => {
+  test("sell amount equals full balance (no fractional sells)", () => {
     const rng = mulberry32(5);
     const balance = 1_000_000_000_000_000_000n; // 1 TIBBIR
     let sawSell = false;
@@ -109,8 +109,7 @@ describe("planAction", () => {
       });
       if (action?.side === "sell") {
         sawSell = true;
-        assert.ok(action.amountInWei <= (balance * 70n) / 100n, `sell ${action.amountInWei} > 70% of ${balance}`);
-        assert.ok(action.amountInWei > 0n);
+        assert.equal(action.amountInWei, balance, `expected full-balance sell, got ${action.amountInWei}`);
       }
     }
     assert.ok(sawSell, "expected at least one sell across 500 iterations");

@@ -26,6 +26,10 @@ Backend en Node.js que opera muchas wallets EVM (target 500-1000 en Base, extens
 - **Decidido**: daemon continuo. Cada wallet genera 3-4 trades/día con jitter para distribución no uniforme. Horarios humanos por wallet (no 24/7 plano).
 - **Rechazado**: one-shot via cron (más simple pero pierde el patrón "humano" entre runs).
 
+### Sells: full-balance, no fraccional
+- **Decidido (2026-05-20)**: cada sell vende el 100% del balance del token. Ciclo natural: buy → buy → buy → sell-all → buy → …
+- **Rechazado**: sells fraccional aleatorio (10-70%). Más "trading-like" pero acumula dust de muchos tokens en cada wallet, complica la limpieza, y el ciclo full-balance también se ve humano (mucha gente "dumpea" la posición entera en lugar de salir gradual).
+
 ### Multi-chain
 - **Decidido**: archivo `config/chains/<chain>.json` por chain con addresses y endpoints; selección via `.env CHAIN=base`. Permite extender a otras EVM cambiando un archivo.
 

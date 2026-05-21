@@ -4,6 +4,7 @@ import * as virtuals from "../adapters/virtuals.js";
 import { config } from "../config.js";
 import { notifyError, notifyTrade } from "../notify/telegram.js";
 import { checkBeforeSell, checkToken } from "../safety/honeypot.js";
+import { checkBondingCurve } from "../safety/virtuals.js";
 import { logger } from "../util/logger.js";
 import { inc } from "../util/metrics.js";
 import { hasApproval, insertTrade, recordApproval, updateTrade } from "./db.js";
@@ -132,9 +133,14 @@ export const executeAction = async ({ wallet, plan }) => {
     created_at: Date.now(),
   });
 
-  const safety = plan.side === "buy"
-    ? await checkToken(plan.token.address)
-    : await checkBeforeSell(plan.token.address);
+  // Virtuals pre-grad tokens don't have Uniswap pools — honeypot.is can't simulate them.
+  // For dex=virtuals we use a bonding-curve roundtrip probe instead. Other dexes go through
+  // honeypot.is as before.
+  const safety = plan.dex === "virtuals"
+    ? await checkBondingCurve({ agentToken: plan.token.address })
+    : plan.side === "buy"
+      ? await checkToken(plan.token.address)
+      : await checkBeforeSell(plan.token.address);
 
   inc("safety", { verdict: safety.safe ? "safe" : "unsafe", cached: safety.cached ? "yes" : "no" });
 
