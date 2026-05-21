@@ -9,6 +9,8 @@ import { logger } from "../util/logger.js";
 import {
   listDiscoveredTokens,
   setDiscoveredTokenStatus,
+  touchDiscoveredSafetyAt,
+  touchDiscoveredTradedAt,
   upsertDiscoveredToken,
 } from "./db.js";
 import { loadTokens } from "./tokens.js";
@@ -35,6 +37,9 @@ const rowToToken = (row) => ({
   ...(row.virtuals_state ? { virtualsState: row.virtuals_state } : {}),
   // expose source for the planner / metrics; static tokens don't carry one
   source: row.source,
+  discoveredAt: row.discovered_at,
+  lastTradedAt: row.last_traded_at,
+  safetyCheckedAt: row.safety_checked_at,
 });
 
 let staticTokens = null;
@@ -101,6 +106,17 @@ export const markUnsafe = ({ address, chain = config.chain.name, reason }) => {
 export const markExpired = ({ address, chain = config.chain.name, reason }) => {
   setDiscoveredTokenStatus({ address, chain, status: EXPIRED });
   logger.info({ address, reason }, "token expired from registry");
+};
+
+// Called by the executor after a successful submit. Static tokens are silently no-op'd
+// (UPDATE matches zero rows). Used by the sweeper to compute TTL eviction.
+export const markTraded = ({ address, chain = config.chain.name, at = Date.now() }) => {
+  touchDiscoveredTradedAt({ address, chain, at });
+};
+
+// Called by the sweeper after a successful re-safety probe to push out the next check.
+export const refreshSafetyChecked = ({ address, chain = config.chain.name, at = Date.now() }) => {
+  touchDiscoveredSafetyAt({ address, chain, at });
 };
 
 // Test-friendly helper to inspect all rows regardless of status.

@@ -11,6 +11,7 @@ import { withRetry } from "../util/retry.js";
 import { waitForAllowance } from "../util/waitForAllowance.js";
 import { hasApproval, insertTrade, recordApproval, updateTrade } from "./db.js";
 import { publicClient } from "./rpc.js";
+import { markTraded } from "./tokenRegistry.js";
 import { withWalletLock } from "./nonceManager.js";
 
 const NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -216,6 +217,9 @@ export const executeAction = async ({ wallet, plan }) => {
     );
     updateTrade(tradeId, { status: "submitted", tx_hash: dispatched.txHash });
     inc("trade", { status: "submitted", dex: plan.dex, side: plan.side });
+    // No-op for static tokens; bumps last_traded_at for discovered ones so the sweeper
+    // doesn't TTL-evict them while they're actively being cycled.
+    markTraded({ address: plan.token.address });
     notifyTrade({
       walletId: wallet.id,
       dex: plan.dex,

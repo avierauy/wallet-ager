@@ -59,4 +59,10 @@ export const config = {
     dryRun: optional("DRY_RUN") === "true" || process.argv.includes("--dry-run"),
     maxConcurrency: Number(optional("MAX_CONCURRENCY", "10")),
   },
+  discovery: {
+    // How often the sweeper re-runs safety on active discovered tokens.
+    recheckHours: Number(optional("DISCOVERY_RECHECK_HOURS", "6")),
+    // How long a discovered token can sit untraded before it's evicted (expired).
+    ttlHours: Number(optional("DISCOVERY_TTL_HOURS", "48")),
+  },
 };

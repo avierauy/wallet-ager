@@ -170,6 +170,20 @@ export const setDiscoveredTokenStatus = ({ address, chain, status }) =>
     )
     .run(status, address, chain);
 
+export const touchDiscoveredTradedAt = ({ address, chain, at }) =>
+  db
+    .prepare(
+      `UPDATE discovered_tokens SET last_traded_at = ? WHERE address = ? AND chain = ?`
+    )
+    .run(at, address, chain);
+
+export const touchDiscoveredSafetyAt = ({ address, chain, at }) =>
+  db
+    .prepare(
+      `UPDATE discovered_tokens SET safety_checked_at = ? WHERE address = ? AND chain = ?`
+    )
+    .run(at, address, chain);
+
 export const recordApproval = (row) =>
   db
     .prepare(
