@@ -1,3 +1,18 @@
+// Listens for new tokens deployed across all three Uniswap versions on Base:
+//   V2 — UniswapV2Factory.PairCreated
+//   V3 — UniswapV3Factory.PoolCreated
+//   V4 — PoolManager.Initialize  (currency0 can be address(0) for native ETH)
+//
+// Common pipeline per event:
+//   1. Cheap WETH-or-native pair filter (no RPC/fetch on rejected pairs).
+//   2. Liquidity check on the new pool/pair (skip empty deployments).
+//   3. ERC20 metadata read on the non-WETH token.
+//   4. honeypot.is safety probe.
+//   5. Register ACTIVE or UNSAFE.
+//
+// All three versions register `tradeableOn: ["uniswap"]` so the AlphaRouter
+// auto-router picks the best route at trade time regardless of where the
+// pool actually lives.
 import { parseAbi, parseAbiItem } from "viem";
 import { config } from "../config.js";
 import { publicClient } from "../core/rpc.js";
@@ -5,8 +20,16 @@ import { add, STATUS } from "../core/tokenRegistry.js";
 import { checkToken } from "../safety/honeypot.js";
 import { logger } from "../util/logger.js";
 
+const PairCreated = parseAbiItem(
+  "event PairCreated(address indexed token0, address indexed token1, address pair, uint256)"
+);
+
 const PoolCreated = parseAbiItem(
   "event PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)"
+);
+
+const V4Initialize = parseAbiItem(
+  "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)"
 );
 
 const ERC20_META_ABI = parseAbi([
@@ -14,17 +37,28 @@ const ERC20_META_ABI = parseAbi([
   "function decimals() view returns (uint8)",
 ]);
 
+const V2_PAIR_ABI = parseAbi([
+  "function getReserves() view returns (uint112, uint112, uint32)",
+]);
+
 const V3_POOL_ABI = parseAbi([
   "function liquidity() view returns (uint128)",
 ]);
 
-const WETH = () => config.chain.wnative.toLowerCase();
-const V3_FACTORY = () => config.chain.dexes.uniswap.v3Factory;
+const NATIVE_ZERO = "0x0000000000000000000000000000000000000000";
 
-// Pools below this `liquidity()` value are skipped — they were created but no LP was added.
-// (V3 `liquidity` is a tick-relative value, not a USD figure, but >0 is a meaningful signal
-// that someone seeded the pool. We deliberately don't compute USD here to keep this cheap.)
-const MIN_POOL_LIQUIDITY = 1n;
+const WETH = () => config.chain.wnative.toLowerCase();
+const V2_FACTORY = () => config.chain.dexes.uniswap.v2Factory;
+const V3_FACTORY = () => config.chain.dexes.uniswap.v3Factory;
+const V4_POOL_MANAGER = () => config.chain.dexes.uniswap.v4PoolManager;
+
+const isWethOrNative = (addr) => {
+  if (!addr) return false;
+  const a = addr.toLowerCase();
+  return a === WETH() || a === NATIVE_ZERO;
+};
+
+const pickNonNative = (a, b) => (isWethOrNative(a) ? b : a);
 
 const fetchMetadata = async (address) => {
   try {
@@ -39,72 +73,143 @@ const fetchMetadata = async (address) => {
   }
 };
 
-const fetchLiquidity = async (poolAddress) => {
+const fetchV2Reserves = async (pair) => {
   try {
-    return await publicClient.readContract({
-      address: poolAddress,
-      abi: V3_POOL_ABI,
-      functionName: "liquidity",
+    const [r0, r1] = await publicClient.readContract({
+      address: pair, abi: V2_PAIR_ABI, functionName: "getReserves",
     });
-  } catch {
-    return 0n;
-  }
+    return r0 + r1;
+  } catch { return 0n; }
 };
 
-export const handlePoolCreated = async ({ token0, token1, fee, pool }) => {
-  const weth = WETH();
-  const isToken0Weth = token0.toLowerCase() === weth;
-  const isToken1Weth = token1.toLowerCase() === weth;
-  if (!isToken0Weth && !isToken1Weth) return { skipped: "not-weth-pair" };
+const fetchV3Liquidity = async (pool) => {
+  try {
+    return await publicClient.readContract({
+      address: pool, abi: V3_POOL_ABI, functionName: "liquidity",
+    });
+  } catch { return 0n; }
+};
 
-  const tokenAddr = isToken0Weth ? token1 : token0;
-
-  const liquidity = await fetchLiquidity(pool);
-  if (liquidity < MIN_POOL_LIQUIDITY) return { skipped: "no-liquidity" };
-
+const registerIfSafe = async ({ tokenAddr, source, extra = {} }) => {
   const meta = await fetchMetadata(tokenAddr);
   if (!meta) return { skipped: "no-metadata" };
-
   const safety = await checkToken(tokenAddr);
   const status = safety.safe ? STATUS.ACTIVE : STATUS.UNSAFE;
-
   add({
     address: tokenAddr,
     symbol: meta.symbol,
     decimals: meta.decimals,
     tradeableOn: ["uniswap"],
-    source: `uniswap-v3-fee${fee}`,
+    source,
     status,
   });
-  logger.info(
-    { token: tokenAddr, symbol: meta.symbol, fee, pool, status, liquidity: liquidity.toString() },
-    "uniswap: PoolCreated processed"
-  );
-  return { added: true, status, fee, pool };
+  logger.info({ token: tokenAddr, symbol: meta.symbol, source, status, ...extra }, "uniswap: discovery resolved");
+  return { added: true, status };
 };
 
-let unwatch = null;
+// ----- V2 -----
+export const handleV2PairCreated = async ({ token0, token1, pair }) => {
+  if (!isWethOrNative(token0) && !isWethOrNative(token1)) return { skipped: "not-weth-pair" };
+  const totalReserves = await fetchV2Reserves(pair);
+  if (totalReserves === 0n) return { skipped: "no-liquidity" };
+  return registerIfSafe({ tokenAddr: pickNonNative(token0, token1), source: "uniswap-v2", extra: { pair } });
+};
+
+// ----- V3 -----
+export const handleV3PoolCreated = async ({ token0, token1, fee, pool }) => {
+  if (!isWethOrNative(token0) && !isWethOrNative(token1)) return { skipped: "not-weth-pair" };
+  const liquidity = await fetchV3Liquidity(pool);
+  if (liquidity === 0n) return { skipped: "no-liquidity" };
+  return registerIfSafe({
+    tokenAddr: pickNonNative(token0, token1),
+    source: `uniswap-v3-fee${fee}`,
+    extra: { pool, liquidity: liquidity.toString() },
+  });
+};
+
+// ----- V4 -----
+// V4 pools are pre-initialized empty — there's no cheap "has liquidity?" view available from
+// the PoolManager (liquidity is per-position). We rely on honeypot.is's simulation to fail
+// gracefully on tokens that can't actually be traded; over time the sweeper evicts unfunded
+// ones via TTL.
+export const handleV4Initialize = async ({ currency0, currency1, fee, hooks, pool }) => {
+  if (!isWethOrNative(currency0) && !isWethOrNative(currency1)) return { skipped: "not-weth-pair" };
+  const tokenAddr = pickNonNative(currency0, currency1);
+  if (tokenAddr.toLowerCase() === NATIVE_ZERO) return { skipped: "both-native" };
+  return registerIfSafe({
+    tokenAddr,
+    source: `uniswap-v4-fee${fee}`,
+    extra: { pool, hooks },
+  });
+};
+
+// ----- watchers -----
+let unwatchers = [];
 
 export const startUniswapDiscovery = () => {
-  if (unwatch) return;
-  unwatch = publicClient.watchEvent({
-    address: V3_FACTORY(),
-    event: PoolCreated,
-    onLogs: (logs) => {
-      for (const log of logs) {
-        handlePoolCreated({
-          token0: log.args.token0,
-          token1: log.args.token1,
-          fee: log.args.fee,
-          pool: log.args.pool,
-        }).catch((err) => logger.error({ err: err.message }, "uniswap: handlePoolCreated threw"));
-      }
-    },
-    onError: (err) => logger.error({ err: err.message }, "uniswap: watcher error"),
-  });
-  logger.info({ contract: V3_FACTORY() }, "uniswap V3 discovery started");
+  if (unwatchers.length > 0) return;
+
+  unwatchers.push(
+    publicClient.watchEvent({
+      address: V2_FACTORY(),
+      event: PairCreated,
+      onLogs: (logs) => {
+        for (const log of logs) {
+          handleV2PairCreated({
+            token0: log.args.token0,
+            token1: log.args.token1,
+            pair: log.args.pair,
+          }).catch((err) => logger.error({ err: err.message }, "uniswap V2: handler threw"));
+        }
+      },
+      onError: (err) => logger.error({ err: err.message }, "uniswap V2: watcher error"),
+    })
+  );
+
+  unwatchers.push(
+    publicClient.watchEvent({
+      address: V3_FACTORY(),
+      event: PoolCreated,
+      onLogs: (logs) => {
+        for (const log of logs) {
+          handleV3PoolCreated({
+            token0: log.args.token0,
+            token1: log.args.token1,
+            fee: log.args.fee,
+            pool: log.args.pool,
+          }).catch((err) => logger.error({ err: err.message }, "uniswap V3: handler threw"));
+        }
+      },
+      onError: (err) => logger.error({ err: err.message }, "uniswap V3: watcher error"),
+    })
+  );
+
+  unwatchers.push(
+    publicClient.watchEvent({
+      address: V4_POOL_MANAGER(),
+      event: V4Initialize,
+      onLogs: (logs) => {
+        for (const log of logs) {
+          handleV4Initialize({
+            currency0: log.args.currency0,
+            currency1: log.args.currency1,
+            fee: log.args.fee,
+            hooks: log.args.hooks,
+            pool: log.args.id,
+          }).catch((err) => logger.error({ err: err.message }, "uniswap V4: handler threw"));
+        }
+      },
+      onError: (err) => logger.error({ err: err.message }, "uniswap V4: watcher error"),
+    })
+  );
+
+  logger.info(
+    { v2: V2_FACTORY(), v3: V3_FACTORY(), v4: V4_POOL_MANAGER() },
+    "uniswap discovery started (V2 + V3 + V4)"
+  );
 };
 
 export const stopUniswapDiscovery = () => {
-  if (unwatch) { unwatch(); unwatch = null; }
+  for (const unwatch of unwatchers) { try { unwatch(); } catch {} }
+  unwatchers = [];
 };

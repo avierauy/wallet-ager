@@ -11,7 +11,9 @@
       "kind": "uniswap-universal-router",
       "universalRouter": "0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7",
       "quoterV2": "0x3d4e44eb1374240ce5f1b871ab261cd16335b76a",
+      "v2Factory": "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6",
       "v3Factory": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+      "v4PoolManager": "0x498581fF718922c3f8e6A244956aF099B2652b2b",
       "defaultFeeTier": 3000,
       "interfaceFeeBps": 25,
       "interfaceFeeRecipient": null
@@ -19,7 +21,8 @@
     "bankr": {
       "kind": "zeroex-allowance-holder",
       "settler": "0x0000000000001ff3684f28c67538d4d072c22734",
-      "apiBase": "https://api.0x.org/swap/allowance-holder"
+      "apiBase": "https://api.0x.org/swap/allowance-holder",
+      "airlock": "0x660eAaedEBc968f8f3694354FA8EC0b4c5Ba8D12"
     },
     "virtuals": {
       "kind": "virtuals",
