@@ -8,7 +8,9 @@ import { checkBondingCurve } from "../safety/virtuals.js";
 import { logger } from "../util/logger.js";
 import { inc } from "../util/metrics.js";
 import { withRetry } from "../util/retry.js";
+import { waitForAllowance } from "../util/waitForAllowance.js";
 import { hasApproval, insertTrade, recordApproval, updateTrade } from "./db.js";
+import { publicClient } from "./rpc.js";
 import { withWalletLock } from "./nonceManager.js";
 
 const NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -20,6 +22,14 @@ const ensurePermit2Approval = async ({ wallet, token }) => {
   if (hasApproval({ wallet_id: wallet.id, token, spender: config.chain.permit2 })) return;
   const hash = await uniswap.approveTokenToPermit2({ account: wallet.account, token });
   if (hash) {
+    await publicClient.waitForTransactionReceipt({ hash });
+    // Guard the subsequent sell against RPC state staleness — any large allowance is fine here.
+    await waitForAllowance({
+      owner: wallet.account.address,
+      token,
+      spender: config.chain.permit2,
+      atLeast: 2n ** 128n,
+    });
     recordApproval({
       wallet_id: wallet.id,
       token,

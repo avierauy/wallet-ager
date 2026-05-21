@@ -1,6 +1,7 @@
 import { concat, encodeFunctionData, erc20Abi, parseAbi } from "viem";
 import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
+import { waitForAllowance } from "../util/waitForAllowance.js";
 import * as uniswap from "./uniswap.js";
 
 const BONDING_ABI = parseAbi([
@@ -146,7 +147,17 @@ export const executeBuyFlow = async ({ wallet, agentToken, plannedAmountInWei, s
     token: VIRTUAL_TOKEN(),
     amount: virtualBalance,
   });
-  if (approveTx) await publicClient.waitForTransactionReceipt({ hash: approveTx });
+  if (approveTx) {
+    await publicClient.waitForTransactionReceipt({ hash: approveTx });
+    // Receipt isn't enough: Infura's load-balanced reads can briefly return stale state for
+    // the next tx's pre-flight (estimateGas). Poll allowance until the spender sees it.
+    await waitForAllowance({
+      owner: account.address,
+      token: VIRTUAL_TOKEN(),
+      spender: PRE_GRAD_SPENDER(),
+      atLeast: virtualBalance,
+    });
+  }
 
   const expectedOut = await quoteVirtualToAgent({ agentToken, amountInVirtualWei: virtualBalance });
   const minOut = applySlippage(expectedOut, slippageBps);
@@ -173,7 +184,15 @@ export const executeSellFlow = async ({ wallet, agentToken, amountInWei, slippag
   const account = wallet.account;
 
   const approveTx = await approveForPreGrad({ account, token: agentToken, amount: amountInWei });
-  if (approveTx) await publicClient.waitForTransactionReceipt({ hash: approveTx });
+  if (approveTx) {
+    await publicClient.waitForTransactionReceipt({ hash: approveTx });
+    await waitForAllowance({
+      owner: account.address,
+      token: agentToken,
+      spender: PRE_GRAD_SPENDER(),
+      atLeast: amountInWei,
+    });
+  }
 
   const expectedOut = await quoteAgentToVirtual({ agentToken, amountInAgentWei: amountInWei });
   const minOut = applySlippage(expectedOut, slippageBps);
