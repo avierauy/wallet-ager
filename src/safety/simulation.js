@@ -18,7 +18,9 @@ import { quote as defaultQuote } from "../adapters/uniswap.js";
 import { publicClient as defaultPublicClient } from "../core/rpc.js";
 
 const NATIVE_SENTINEL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-const FAKE_BUYER = "0x000000000000000000000000000000000000C0DE";
+// Address must be either all-lowercase or properly EIP-55 checksummed for viem; the previous
+// mixed-case "0x...C0DE" failed viem validation. Use the all-lowercase canonical form.
+const FAKE_BUYER = "0x000000000000000000000000000000000000c0de";
 const PROBE_AMOUNT_ETH = parseEther("0.0001");
 const MIN_ROUNDTRIP_PCT = 70; // tolerate up to 30% loss (taxes + price impact on the probe)
 const FAKE_BUYER_ETH_OVERRIDE = parseEther("1"); // way more than we'll spend, covers gas too
