@@ -1,7 +1,7 @@
 import { config } from "./config.js";
 import { ensureInitialSnapshot, fetchTokenPrices } from "./core/balanceTracker.js";
 import "./core/db.js"; // trigger schema init
-import { loadTokens } from "./core/tokens.js";
+import { getActive as getActiveTokens } from "./core/tokenRegistry.js";
 import { loadWallets } from "./core/wallets.js";
 import { notifyInfo, startBatchTimer } from "./notify/telegram.js";
 import { startWalletLoop } from "./orchestrator.js";
@@ -14,7 +14,7 @@ const STARTUP_SNAPSHOT_CONCURRENCY = 20;
 
 async function main() {
   const wallets = loadWallets();
-  const tokens = loadTokens();
+  const tokens = getActiveTokens(); // snapshot for startup snapshotting/logging; orchestrator re-reads per tick
   logger.info(
     {
       chain: config.chain.name,
@@ -57,7 +57,7 @@ async function main() {
   }
 
   for (const wallet of wallets) {
-    startWalletLoop({ wallet, tokens });
+    startWalletLoop({ wallet });
   }
 
   setInterval(() => logger.info(snapshot(), "metrics snapshot"), METRICS_LOG_INTERVAL_MS);

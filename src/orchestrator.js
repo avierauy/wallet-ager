@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import { fetchBalances } from "./core/balances.js";
 import { executeAction } from "./core/executor.js";
+import { getActive as getActiveTokens } from "./core/tokenRegistry.js";
 import { planAction } from "./strategy/planner.js";
 import { initialDelayMs, isWithinActiveHours, nextDelayMs } from "./strategy/scheduler.js";
 import { logger } from "./util/logger.js";
@@ -20,7 +21,7 @@ const buildEnabledDexes = () => {
 const filterDexWeights = (weights, enabled) =>
   Object.fromEntries(Object.entries(weights).filter(([dex]) => enabled.includes(dex)));
 
-export const runOneTick = async ({ wallet, tokens, rng }) => {
+export const runOneTick = async ({ wallet, rng, tokens }) => {
   const enabled = buildEnabledDexes();
   const nowHour = new Date().getUTCHours();
   if (!isWithinActiveHours(nowHour, wallet.profile.activeHoursUtc)) {
@@ -34,10 +35,14 @@ export const runOneTick = async ({ wallet, tokens, rng }) => {
   }
   const effectiveProfile = { ...wallet.profile, dexWeights: effectiveWeights };
 
-  const { native, byToken } = await fetchBalances({ account: wallet.account, tokens });
+  // Snapshot the registry per tick so newly discovered tokens become tradeable immediately.
+  // `tokens` is reserved for tests / smoke flows that want to inject a fixed set.
+  const activeTokens = tokens ?? getActiveTokens();
+
+  const { native, byToken } = await fetchBalances({ account: wallet.account, tokens: activeTokens });
   const plan = planAction({
     profile: effectiveProfile,
-    tokens,
+    tokens: activeTokens,
     balances: byToken,
     nativeBalance: native,
     rng,
@@ -58,7 +63,7 @@ const getTickSem = () => {
 };
 export const _resetTickSem = () => { tickSem = null; };
 
-export const startWalletLoop = ({ wallet, tokens, rng = Math.random }) => {
+export const startWalletLoop = ({ wallet, rng = Math.random }) => {
   const sem = getTickSem();
 
   const tick = async () => {
@@ -66,7 +71,7 @@ export const startWalletLoop = ({ wallet, tokens, rng = Math.random }) => {
     let nextDelay;
     let result = { status: "unknown" };
     try {
-      result = await sem.run(() => runOneTick({ wallet, tokens, rng }));
+      result = await sem.run(() => runOneTick({ wallet, rng }));
     } catch (err) {
       logger.error({ walletId: wallet.id, err: err.message }, "tick threw");
       inc("tick", { status: "threw" });

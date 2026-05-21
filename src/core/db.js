@@ -64,6 +64,24 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_initial
     ON wallet_balance_snapshots(wallet_id) WHERE is_initial = 1;
 
+  CREATE TABLE IF NOT EXISTS discovered_tokens (
+    address TEXT COLLATE NOCASE NOT NULL,
+    chain TEXT NOT NULL,
+    symbol TEXT,
+    decimals INTEGER NOT NULL,
+    tradeable_on TEXT NOT NULL,
+    virtuals_state TEXT,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    discovered_at INTEGER NOT NULL,
+    safety_checked_at INTEGER,
+    last_traded_at INTEGER,
+    ttl_expires_at INTEGER,
+    PRIMARY KEY (address, chain)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_discovered_status ON discovered_tokens(status, chain);
+
   CREATE TABLE IF NOT EXISTS token_safety (
     token TEXT COLLATE NOCASE NOT NULL,
     chain TEXT NOT NULL,
@@ -114,6 +132,43 @@ export const getLatestSnapshot = (walletId) =>
       `SELECT * FROM wallet_balance_snapshots WHERE wallet_id = ? ORDER BY taken_at DESC LIMIT 1`
     )
     .get(walletId);
+
+export const upsertDiscoveredToken = (row) =>
+  db
+    .prepare(
+      `INSERT INTO discovered_tokens
+        (address, chain, symbol, decimals, tradeable_on, virtuals_state, source, status,
+         discovered_at, safety_checked_at, last_traded_at, ttl_expires_at)
+       VALUES (@address, @chain, @symbol, @decimals, @tradeable_on, @virtuals_state, @source, @status,
+               @discovered_at, @safety_checked_at, @last_traded_at, @ttl_expires_at)
+       ON CONFLICT(address, chain) DO UPDATE SET
+         symbol            = excluded.symbol,
+         decimals          = excluded.decimals,
+         tradeable_on      = excluded.tradeable_on,
+         virtuals_state    = excluded.virtuals_state,
+         source            = excluded.source,
+         status            = excluded.status,
+         safety_checked_at = excluded.safety_checked_at,
+         last_traded_at    = COALESCE(excluded.last_traded_at, discovered_tokens.last_traded_at),
+         ttl_expires_at    = excluded.ttl_expires_at`
+    )
+    .run(row);
+
+export const listDiscoveredTokens = ({ chain, status }) => {
+  const rows = status
+    ? db
+        .prepare(`SELECT * FROM discovered_tokens WHERE chain = ? AND status = ?`)
+        .all(chain, status)
+    : db.prepare(`SELECT * FROM discovered_tokens WHERE chain = ?`).all(chain);
+  return rows;
+};
+
+export const setDiscoveredTokenStatus = ({ address, chain, status }) =>
+  db
+    .prepare(
+      `UPDATE discovered_tokens SET status = ? WHERE address = ? AND chain = ?`
+    )
+    .run(status, address, chain);
 
 export const recordApproval = (row) =>
   db

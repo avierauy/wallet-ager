@@ -1,7 +1,7 @@
 // Print current wallet values vs the initial snapshot. Run: `npm run balances`.
 import { computeWalletValue, fetchTokenPrices } from "../src/core/balanceTracker.js";
 import { getInitialSnapshot } from "../src/core/db.js";
-import { loadTokens } from "../src/core/tokens.js";
+import { getActive as getActiveTokens } from "../src/core/tokenRegistry.js";
 import { loadWallets } from "../src/core/wallets.js";
 
 const fmtEth = (wei) => (Number(wei) / 1e18).toFixed(6);
@@ -17,7 +17,7 @@ const pct = (now, init) => {
 };
 
 const wallets = loadWallets();
-const tokens = loadTokens();
+const tokens = getActiveTokens();
 
 console.log(`Fetching prices for ${tokens.length} tokens via AlphaRouter…`);
 const prices = await fetchTokenPrices(tokens);
