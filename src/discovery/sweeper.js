@@ -15,8 +15,7 @@ import {
   refreshSafetyChecked,
   STATUS,
 } from "../core/tokenRegistry.js";
-import { checkToken } from "../safety/honeypot.js";
-import { checkBondingCurve } from "../safety/virtuals.js";
+import { checkBondingCurve, checkToken } from "../safety/index.js";
 import { logger } from "../util/logger.js";
 import { inc } from "../util/metrics.js";
 

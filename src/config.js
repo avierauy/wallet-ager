@@ -65,4 +65,9 @@ export const config = {
     // How long a discovered token can sit untraded before it's evicted (expired).
     ttlHours: Number(optional("DISCOVERY_TTL_HOURS", "48")),
   },
+  safety: {
+    // "simulation" (default) — on-chain buy + roundtrip via AlphaRouter (covers V2/V3/V4).
+    // "honeypot"             — external honeypot.is API (legacy; coverage gaps on V4).
+    provider: optional("SAFETY_PROVIDER", "simulation"),
+  },
 };

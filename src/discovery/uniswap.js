@@ -17,7 +17,7 @@ import { parseAbi, parseAbiItem } from "viem";
 import { config } from "../config.js";
 import { publicClient } from "../core/rpc.js";
 import { add, STATUS } from "../core/tokenRegistry.js";
-import { checkToken } from "../safety/honeypot.js";
+import { checkToken } from "../safety/index.js";
 import { logger } from "../util/logger.js";
 import { tokenHasExistingPools } from "./poolExistence.js";
 
