@@ -18,6 +18,14 @@ const fetchHoneypotApi = async (token) => {
   url.searchParams.set("address", token);
   url.searchParams.set("chainID", String(config.chain.chainId));
   const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+  if (res.status === 404) {
+    // honeypot.is hasn't indexed this pair yet — common for tokens we discover seconds after
+    // pool creation. Distinct from "unreachable" so the caller can treat as PENDING and retry.
+    const body = await res.text();
+    const e = new Error(`honeypot.is has not indexed this pair yet: ${body}`);
+    e.pending = true;
+    throw e;
+  }
   if (!res.ok) throw new Error(`honeypot.is ${res.status}: ${await res.text()}`);
   return res.json();
 };
@@ -96,7 +104,23 @@ export const checkToken = async (token) => {
     return { ...verdict, cached: false };
   } catch (err) {
     logger.warn({ err: err.message, token }, "honeypot.is check failed");
-    // Fail-safe: if the API is down we DON'T trade, to avoid buying scams blindly.
+    if (err.pending) {
+      // Recoverable: the pair just isn't indexed yet. Caller (discovery) should record as
+      // PENDING and let the sweeper retry instead of marking unsafe permanently.
+      return {
+        safe: false,
+        pending: true,
+        reasons: [err.message],
+        isHoneypot: null,
+        buyTax: null,
+        sellTax: null,
+        transferTax: null,
+        simulationSuccess: false,
+        riskLevel: null,
+        cached: false,
+      };
+    }
+    // True failure: API down, 5xx, network error. Stay conservative and don't trade.
     return {
       safe: false,
       reasons: [`honeypot.is unreachable: ${err.message}`],

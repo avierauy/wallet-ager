@@ -37,7 +37,11 @@ export const handleLaunched = async ({ token }) => {
   if (!meta) return { skipped: "no-metadata" };
 
   const safety = await checkBondingCurve({ agentToken: token });
-  const status = safety.safe ? STATUS.ACTIVE : STATUS.UNSAFE;
+  const status = safety.pending
+    ? STATUS.PENDING
+    : safety.safe
+      ? STATUS.ACTIVE
+      : STATUS.UNSAFE;
   add({
     address: token,
     symbol: meta.symbol,

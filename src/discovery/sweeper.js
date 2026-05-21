@@ -32,16 +32,27 @@ const lastActivityMs = (token) => token.lastTradedAt ?? token.discoveredAt ?? 0;
 
 export const sweepOnce = async ({ now = Date.now(), ttlHours = config.discovery.ttlHours } = {}) => {
   const ttlMs = ttlHours * ONE_HOUR_MS;
-  const tokens = _listAll().filter((t) => t.source); // only discovered, skip static merge surprises
+  const SWEEP_STATUSES = new Set(["active", "pending"]); // UNSAFE/EXPIRED are terminal
+  const all = _listAll();
+  // _listAll returns the latest snapshot but doesn't carry status field on the token shape, so
+  // we re-query each row's status from the registry helpers via getActive() set membership and
+  // explicit DB read. Simpler: filter on tokens we know are still mutable.
+  const tokens = all.filter((t) => t.source);
+  const { listDiscoveredTokens } = await import("../core/db.js");
+  const statusByAddr = new Map(
+    listDiscoveredTokens({ chain: config.chain.name }).map((r) => [r.address.toLowerCase(), r.status])
+  );
+
   let expired = 0;
   let rechecked = 0;
   let markedUnsafe = 0;
+  let markedActive = 0;
+  let stillPending = 0;
   let skipped = 0;
 
   for (const token of tokens) {
-    // Only sweep currently active rows. UNSAFE/EXPIRED are terminal in this iteration.
-    const row = _listAll().find((t) => t.address.toLowerCase() === token.address.toLowerCase());
-    if (!row) continue;
+    const status = statusByAddr.get(token.address.toLowerCase());
+    if (!SWEEP_STATUSES.has(status)) { skipped++; continue; }
 
     // TTL check first (cheap, no network).
     const idleMs = now - lastActivityMs(token);
@@ -57,10 +68,32 @@ export const sweepOnce = async ({ now = Date.now(), ttlHours = config.discovery.
 
     try {
       const verdict = await check();
+      if (verdict.pending) {
+        // Still not indexed by honeypot.is. Leave as-is; TTL handles eviction if it never resolves.
+        stillPending++;
+        inc("discovery-sweep", { outcome: "still-pending" });
+        continue;
+      }
       if (!verdict.safe) {
-        markUnsafe({ address: token.address, reason: verdict.reasons.join("; ") });
+        markUnsafe({ address: token.address, reason: (verdict.reasons || []).join("; ") });
         markedUnsafe++;
         inc("discovery-sweep", { outcome: "unsafe" });
+        continue;
+      }
+      // Safe verdict. Promote pending → active, or just refresh active.
+      if (status === "pending") {
+        const { add } = await import("../core/tokenRegistry.js");
+        add({
+          address: token.address,
+          symbol: token.symbol,
+          decimals: token.decimals,
+          tradeableOn: token.tradeableOn,
+          virtualsState: token.virtualsState,
+          source: token.source,
+          status: "active",
+        });
+        markedActive++;
+        inc("discovery-sweep", { outcome: "promoted-active" });
       } else {
         refreshSafetyChecked({ address: token.address });
         rechecked++;
@@ -72,7 +105,10 @@ export const sweepOnce = async ({ now = Date.now(), ttlHours = config.discovery.
     }
   }
 
-  const summary = { scanned: tokens.length, expired, rechecked, markedUnsafe, skipped };
+  const summary = {
+    total: tokens.length,
+    expired, rechecked, markedUnsafe, markedActive, stillPending, skipped,
+  };
   logger.info(summary, "discovery sweep complete");
   return summary;
 };

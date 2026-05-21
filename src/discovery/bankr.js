@@ -11,6 +11,7 @@ import { publicClient } from "../core/rpc.js";
 import { add, STATUS } from "../core/tokenRegistry.js";
 import { checkToken } from "../safety/honeypot.js";
 import { logger } from "../util/logger.js";
+import { tokenHasExistingPools } from "./poolExistence.js";
 
 const AirlockCreate = parseAbiItem(
   "event Create(address asset, address indexed numeraire, address initializer, address poolOrHook)"
@@ -46,11 +47,28 @@ const fetchMetadata = async (address) => {
 
 export const handleAirlockCreate = async ({ asset, numeraire, initializer, poolOrHook }) => {
   if (!isWethOrNative(numeraire)) return { skipped: "non-weth-numeraire" };
+
+  // First-listing filter — defends against the case where a Doppler relaunch happens for an
+  // already-tradeable token. (Airlock theoretically only fires for fresh deploys, but this is
+  // cheap and consistent with the uniswap handlers.)
+  const existing = await tokenHasExistingPools({ tokenAddr: asset, excludePool: poolOrHook });
+  if (existing.exists) {
+    logger.info(
+      { asset, alreadyAt: existing.where, initializer, poolOrHook },
+      "bankr/airlock: skipping — token already tradeable elsewhere"
+    );
+    return { skipped: "already-tradeable-elsewhere", existing };
+  }
+
   const meta = await fetchMetadata(asset);
   if (!meta) return { skipped: "no-metadata" };
 
   const safety = await checkToken(asset);
-  const status = safety.safe ? STATUS.ACTIVE : STATUS.UNSAFE;
+  const status = safety.pending
+    ? STATUS.PENDING
+    : safety.safe
+      ? STATUS.ACTIVE
+      : STATUS.UNSAFE;
   add({
     address: asset,
     symbol: meta.symbol,
