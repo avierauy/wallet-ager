@@ -11,6 +11,7 @@
       "kind": "uniswap-universal-router",
       "universalRouter": "0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7",
       "quoterV2": "0x3d4e44eb1374240ce5f1b871ab261cd16335b76a",
+      "v3Factory": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
       "defaultFeeTier": 3000,
       "interfaceFeeBps": 25,
       "interfaceFeeRecipient": null
