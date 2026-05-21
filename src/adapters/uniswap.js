@@ -13,11 +13,10 @@ const { CurrencyAmount, Ether, Percent, Token, TradeType } = require("@uniswap/s
 const { AlphaRouter, SwapType } = require("@uniswap/smart-order-router");
 const { UniversalRouterVersion } = require("@uniswap/universal-router-sdk");
 
-// AlphaRouter's encoding for V2_1_1 in our SDK version produces invalid calldata
-// (SliceOutOfBounds on the V3 path). Falling back to V2_0 — its router is different
-// (0x6ff5693b99212da76ad316178a184ab56d299b43) but the SDK encoder is well-tested.
-// Re-evaluate when smart-order-router/universal-router-sdk publish a working V2_1_1 path.
-const UR_VERSION = UniversalRouterVersion.V2_0;
+// V2_1_1 matches the router the live UI uses (0xfdf6…fbc7). Requires the package.json
+// `overrides` entry forcing universal-router-sdk ^5.4.0 — the version smart-order-router
+// pulls by default (4.35.0) produces invalid V2_1_1 calldata (SliceOutOfBounds).
+const UR_VERSION = UniversalRouterVersion.V2_1_1;
 
 const permit2 = () => config.chain.permit2;
 
@@ -51,7 +50,8 @@ export const quote = async ({ tokenIn, tokenOut, amountInWei, slippageBps, recip
     slippageTolerance: new Percent(slippageBps, 10_000),
     deadline: Math.floor(Date.now() / 1000) + 1800,
     type: SwapType.UNIVERSAL_ROUTER,
-    version: UR_VERSION,
+    version: UR_VERSION,    // smart-order-router reads this for UNIVERSAL_ROUTER_ADDRESS lookup
+    urVersion: UR_VERSION,  // universal-router-sdk reads this for command ABI selection (V2_1_1 adds minHopPriceX36)
     ...(inputTokenPermit ? { inputTokenPermit } : {}),
   });
   if (!route) throw new Error("no route found");

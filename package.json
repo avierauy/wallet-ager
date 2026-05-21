@@ -29,5 +29,8 @@
   },
   "devDependencies": {
     "pino-pretty": "^11.3.0"
+  },
+  "overrides": {
+    "@uniswap/universal-router-sdk": "^5.4.0"
   }
 }
