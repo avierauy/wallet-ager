@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { fetchBalances } from "./core/balances.js";
 import { executeAction } from "./core/executor.js";
 import { getActive as getActiveTokens } from "./core/tokenRegistry.js";
+import { canTrade, getDailyState, recordTrade } from "./strategy/dailyCounter.js";
 import { planAction } from "./strategy/planner.js";
 import { initialDelayMs, isWithinActiveHours, nextDelayMs } from "./strategy/scheduler.js";
 import { logger } from "./util/logger.js";
@@ -40,19 +41,29 @@ export const runOneTick = async ({ wallet, rng, tokens }) => {
   const activeTokens = tokens ?? getActiveTokens();
 
   const { native, byToken } = await fetchBalances({ account: wallet.account, tokens: activeTokens });
+  const allowBuy = canTrade({ wallet, rng });
   const plan = planAction({
     profile: effectiveProfile,
     tokens: activeTokens,
     balances: byToken,
     nativeBalance: native,
     rng,
+    allowBuy,
   });
   if (!plan) {
-    logger.info({ walletId: wallet.id, nativeWei: native.toString() }, "no viable action this tick");
+    logger.info(
+      { walletId: wallet.id, nativeWei: native.toString(), allowBuy,
+        remainingTradesToday: getDailyState({ wallet, rng })?.remaining },
+      "no viable action this tick"
+    );
     return { status: "no-plan" };
   }
 
-  return executeAction({ wallet, plan });
+  const result = await executeAction({ wallet, plan });
+  if (plan.side === "buy" && (result.status === "submitted" || result.status === "dry-run")) {
+    recordTrade({ wallet, rng });
+  }
+  return result;
 };
 
 // Singleton semaphore — bounds global concurrent ticks across all wallets.

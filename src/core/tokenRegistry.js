@@ -29,6 +29,11 @@ const parseTradeable = (s) => {
   }
 };
 
+const parsePoolMetadata = (s) => {
+  if (!s) return null;
+  try { return JSON.parse(s); } catch { return null; }
+};
+
 const rowToToken = (row) => ({
   address: row.address,
   symbol: row.symbol ?? "?",
@@ -37,6 +42,7 @@ const rowToToken = (row) => ({
   ...(row.virtuals_state ? { virtualsState: row.virtuals_state } : {}),
   // expose source for the planner / metrics; static tokens don't carry one
   source: row.source,
+  poolMetadata: parsePoolMetadata(row.pool_metadata),
   discoveredAt: row.discovered_at,
   lastTradedAt: row.last_traded_at,
   safetyCheckedAt: row.safety_checked_at,
@@ -71,6 +77,7 @@ export const add = ({
   virtualsState,
   source,
   status = ACTIVE,
+  poolMetadata = null,
   ttlExpiresAt = null,
   chain = config.chain.name,
 }) => {
@@ -87,13 +94,14 @@ export const add = ({
     virtuals_state: virtualsState ?? null,
     source,
     status,
+    pool_metadata: poolMetadata ? JSON.stringify(poolMetadata) : null,
     discovered_at: Date.now(),
     safety_checked_at: status === ACTIVE ? Date.now() : null,
     last_traded_at: null,
     ttl_expires_at: ttlExpiresAt,
   });
   logger.info(
-    { address, symbol, source, status, tradeableOn },
+    { address, symbol, source, status, tradeableOn, hasPoolMetadata: !!poolMetadata },
     "token added to registry"
   );
 };

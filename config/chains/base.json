@@ -14,6 +14,7 @@
       "v2Factory": "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6",
       "v3Factory": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
       "v4PoolManager": "0x498581fF718922c3f8e6A244956aF099B2652b2b",
+      "v4Quoter": "0x0d5e0f971ed27fbff6c2837bf31316121532048d",
       "defaultFeeTier": 3000,
       "interfaceFeeBps": 25,
       "interfaceFeeRecipient": null

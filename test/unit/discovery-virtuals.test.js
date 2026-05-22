@@ -58,15 +58,22 @@ describe("virtuals discovery handlers", () => {
     assert.equal(row.source, "virtuals-Launched");
   });
 
-  test("handleLaunched registers an unsafe token as UNSAFE (audit trail)", async () => {
-    // safetyRoundtripPct=80 → over the 30% threshold
-    stubPublicClient({ symbol: "RUG", safetyRoundtripPct: 80 });
-    const result = await handleLaunched({ token: TOKEN_BAD });
-    assert.equal(result.status, "unsafe");
+  test("Virtuals tokens skip the bonding-curve safety probe — trusted template", async () => {
+    // Phase A: Virtuals deploys the protocol's standard ERC20 template — no rug surface. The
+    // discovery handler must NOT call getAmountsOut (the safety probe) and must register ACTIVE.
+    let safetyProbeCalled = false;
+    rpc.publicClient.readContract = async ({ functionName }) => {
+      if (functionName === "symbol") return "FRESH";
+      if (functionName === "decimals") return 18;
+      if (functionName === "getAmountsOut") { safetyProbeCalled = true; return 1n; }
+      throw new Error("unexpected: " + functionName);
+    };
 
-    const row = _listAll().find((t) => t.address.toLowerCase() === TOKEN_BAD.toLowerCase());
-    assert.ok(row, "unsafe token still recorded for audit");
-    assert.ok(!getActive().some((t) => t.address.toLowerCase() === TOKEN_BAD.toLowerCase()));
+    const result = await handleLaunched({ token: TOKEN_BAD });
+    assert.equal(result.added, true);
+    assert.equal(result.status, "active");
+    assert.equal(safetyProbeCalled, false, "bonding-curve safety probe must not be called");
+    assert.ok(getActive().some((t) => t.address.toLowerCase() === TOKEN_BAD.toLowerCase()));
   });
 
   test("handleLaunched skips when token metadata can't be read", async () => {

@@ -92,7 +92,7 @@ const fetchV3Liquidity = async (pool) => {
   } catch { return 0n; }
 };
 
-const registerIfFirstAndSafe = async ({ tokenAddr, source, excludePool, extra = {} }) => {
+const registerIfFirstAndSafe = async ({ tokenAddr, source, excludePool, poolMetadata, extra = {} }) => {
   // First-listing filter: skip if the token already has a tradeable pool elsewhere.
   // This event is then "yet another pool for an established token", not a fresh launch.
   const existing = await tokenHasExistingPools({ tokenAddr, excludePool });
@@ -107,6 +107,8 @@ const registerIfFirstAndSafe = async ({ tokenAddr, source, excludePool, extra = 
   const meta = await fetchMetadata(tokenAddr);
   if (!meta) return { skipped: "no-metadata" };
 
+  // For generic Uniswap discovery (not Clanker/Doppler/Virtuals) we keep the safety check —
+  // any random deployer can put any ERC20 in a pool with no template guarantees.
   const safety = await checkToken(tokenAddr);
   const status = safety.pending
     ? STATUS.PENDING
@@ -121,13 +123,17 @@ const registerIfFirstAndSafe = async ({ tokenAddr, source, excludePool, extra = 
     tradeableOn: ["uniswap"],
     source,
     status,
+    poolMetadata,
   });
   logger.info({ token: tokenAddr, symbol: meta.symbol, source, status, ...extra }, "uniswap: discovery resolved");
 
   // Fresh launch + safety verdict came back SAFE → fire sniper buy immediately.
   if (status === STATUS.ACTIVE) {
     tryFireSniperBuy({
-      token: { address: tokenAddr, symbol: meta.symbol, decimals: meta.decimals, tradeableOn: ["uniswap"] },
+      token: {
+        address: tokenAddr, symbol: meta.symbol, decimals: meta.decimals,
+        tradeableOn: ["uniswap"], source, poolMetadata,
+      },
     }).catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
   }
 
@@ -139,10 +145,12 @@ export const handleV2PairCreated = async ({ token0, token1, pair }) => {
   if (!isWethOrNative(token0) && !isWethOrNative(token1)) return { skipped: "not-weth-pair" };
   const totalReserves = await fetchV2Reserves(pair);
   if (totalReserves === 0n) return { skipped: "no-liquidity" };
+  const tokenAddr = pickNonNative(token0, token1);
   return registerIfFirstAndSafe({
-    tokenAddr: pickNonNative(token0, token1),
+    tokenAddr,
     source: "uniswap-v2",
     excludePool: pair,
+    poolMetadata: { version: "v2", pair, token0, token1 },
     extra: { pair },
   });
 };
@@ -152,10 +160,12 @@ export const handleV3PoolCreated = async ({ token0, token1, fee, pool }) => {
   if (!isWethOrNative(token0) && !isWethOrNative(token1)) return { skipped: "not-weth-pair" };
   const liquidity = await fetchV3Liquidity(pool);
   if (liquidity === 0n) return { skipped: "no-liquidity" };
+  const tokenAddr = pickNonNative(token0, token1);
   return registerIfFirstAndSafe({
-    tokenAddr: pickNonNative(token0, token1),
+    tokenAddr,
     source: `uniswap-v3-fee${fee}`,
     excludePool: pool,
+    poolMetadata: { version: "v3", pool, fee: Number(fee), token0, token1 },
     extra: { pool, liquidity: liquidity.toString() },
   });
 };
@@ -165,7 +175,7 @@ export const handleV3PoolCreated = async ({ token0, token1, fee, pool }) => {
 // the PoolManager (liquidity is per-position). We rely on honeypot.is's simulation to fail
 // gracefully on tokens that can't actually be traded; over time the sweeper evicts unfunded
 // ones via TTL.
-export const handleV4Initialize = async ({ currency0, currency1, fee, hooks, pool }) => {
+export const handleV4Initialize = async ({ currency0, currency1, fee, tickSpacing, hooks, pool }) => {
   if (!isWethOrNative(currency0) && !isWethOrNative(currency1)) return { skipped: "not-weth-pair" };
   const tokenAddr = pickNonNative(currency0, currency1);
   if (tokenAddr.toLowerCase() === NATIVE_ZERO) return { skipped: "both-native" };
@@ -174,6 +184,14 @@ export const handleV4Initialize = async ({ currency0, currency1, fee, hooks, poo
     source: `uniswap-v4-fee${fee}`,
     // V4 pool IDs are bytes32 hashes, not addresses — leave excludePool undefined so the
     // V2/V3 check evaluates fully (V4-only tokens have no V2/V3 pool anyway).
+    poolMetadata: {
+      version: "v4",
+      poolId: pool,
+      currency0, currency1,
+      fee: Number(fee),
+      tickSpacing: Number(tickSpacing),
+      hooks,
+    },
     extra: { pool, hooks },
   });
 };
@@ -229,6 +247,7 @@ export const startUniswapDiscovery = () => {
             currency0: log.args.currency0,
             currency1: log.args.currency1,
             fee: log.args.fee,
+            tickSpacing: log.args.tickSpacing,
             hooks: log.args.hooks,
             pool: log.args.id,
           }).catch((err) => logger.error({ err: err.message }, "uniswap V4: handler threw"));

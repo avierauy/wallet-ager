@@ -39,6 +39,7 @@ const ensurePermit2Approval = async ({ wallet, token }) => {
     });
     notifyApproval({
       walletId: wallet.id,
+      walletAddress: wallet.account.address,
       tokenSymbol: token.symbol,
       decimals: token.decimals,
       amountWei: null, // Permit2 one-time MAX → display as "unlimited"
@@ -154,16 +155,36 @@ export const executeAction = async ({ wallet, plan }) => {
     created_at: Date.now(),
   });
 
-  // Virtuals pre-grad tokens don't have Uniswap pools — honeypot.is can't simulate them.
-  // For dex=virtuals we use a bonding-curve roundtrip probe instead. Other dexes go through
-  // honeypot.is as before.
-  const safety = plan.dex === "virtuals"
-    ? await checkBondingCurve({ agentToken: plan.token.address })
-    : plan.side === "buy"
-      ? await checkToken(plan.token.address)
-      : await checkBeforeSell(plan.token.address);
+  // Trusted launchpads (Clanker/Doppler/Virtuals) deploy from fixed ERC20 templates with no
+  // rug surface. We skip the safety probe on BOTH buy and sell sides:
+  //   - Buy : keeps the snipe instant.
+  //   - Sell: avoids the AlphaRouter "no route" cascade where checkBeforeSell uses
+  //           AlphaRouter, which lags the subgraph by minutes on fresh launches and would
+  //           otherwise refuse to verify the sell. The template guarantees no rug surface,
+  //           so the only failure mode is hook-blocked swaps (caught at Quoter time).
+  const isTrustedLaunchpad =
+    /^(clanker-|doppler-|virtuals-)/.test(plan.token.source ?? "");
 
-  inc("safety", { verdict: safety.safe ? "safe" : "unsafe", cached: safety.cached ? "yes" : "no" });
+  const safety = isTrustedLaunchpad
+    ? { safe: true, reasons: [], cached: false, bypassedFor: plan.token.source }
+    // Virtuals pre-grad tokens don't have Uniswap pools — honeypot.is can't simulate them.
+    // For dex=virtuals we use a bonding-curve roundtrip probe instead. Other dexes go through
+    // honeypot.is as before.
+    : plan.dex === "virtuals"
+      ? await checkBondingCurve({ agentToken: plan.token.address })
+      : plan.side === "buy"
+        ? await checkToken(plan.token.address)
+        : await checkBeforeSell(plan.token.address);
+
+  if (isTrustedLaunchpad) {
+    logger.info(
+      { walletId: wallet.id, token: plan.token.symbol, side: plan.side, source: plan.token.source },
+      "safety bypassed — trusted launchpad source"
+    );
+    inc("safety", { verdict: "bypassed", cached: "no" });
+  } else {
+    inc("safety", { verdict: safety.safe ? "safe" : "unsafe", cached: safety.cached ? "yes" : "no" });
+  }
 
   if (!safety.safe) {
     const reason = safety.reasons.join("; ");
@@ -221,6 +242,7 @@ export const executeAction = async ({ wallet, plan }) => {
     markTraded({ address: plan.token.address });
     notifyTrade({
       walletId: wallet.id,
+      walletAddress: wallet.account.address,
       dex: plan.dex,
       side: plan.side,
       txHash: dispatched.txHash,
@@ -229,15 +251,30 @@ export const executeAction = async ({ wallet, plan }) => {
       out: dispatched.out,
     });
     logger.info(
-      { walletId: wallet.id, dex: plan.dex, side: plan.side, token: plan.token.symbol, txHash: dispatched.txHash },
+      { walletId: wallet.id, walletAddress: wallet.account.address,
+        dex: plan.dex, side: plan.side, token: plan.token.symbol, txHash: dispatched.txHash },
       "trade submitted"
     );
     return { status: "submitted", txHash: dispatched.txHash };
   } catch (err) {
     updateTrade(tradeId, { status: "failed", error: err.message });
     inc("trade", { status: "failed", dex: plan.dex, side: plan.side });
-    notifyError({ walletId: wallet.id, dex: plan.dex, error: err.message });
-    logger.error({ walletId: wallet.id, err: err.message, dex: plan.dex }, "execution failed");
+    // Sniper retries set plan.silentOnFail so the operator only gets a Telegram message
+    // once retries are exhausted (sniper handles that final notification itself).
+    if (!plan.silentOnFail) {
+      notifyError({
+        walletId: wallet.id,
+        walletAddress: wallet.account.address,
+        dex: plan.dex,
+        error: err.message,
+        explorer: config.chain.blockExplorer,
+      });
+    }
+    logger.error(
+      { walletId: wallet.id, walletAddress: wallet.account.address,
+        err: err.message, dex: plan.dex, silentOnFail: !!plan.silentOnFail },
+      "execution failed"
+    );
     return { status: "failed", error: err.message };
   }
 };

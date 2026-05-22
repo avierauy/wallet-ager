@@ -12,6 +12,19 @@ export const db = new Database(dbPath);
 db.pragma("journal_mode = WAL");
 db.pragma("synchronous = NORMAL");
 
+// Live migration — add columns added after the original schema was deployed.
+const ensureColumn = (table, column, definition) => {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!rows.some((r) => r.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+};
+try {
+  // Only attempt migration if the table already exists. The CREATE TABLE below handles fresh dbs.
+  const existing = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='discovered_tokens'`).get();
+  if (existing) ensureColumn("discovered_tokens", "pool_metadata", "TEXT");
+} catch {}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS wallet_state (
     wallet_id TEXT PRIMARY KEY,
@@ -73,6 +86,7 @@ db.exec(`
     virtuals_state TEXT,
     source TEXT NOT NULL,
     status TEXT NOT NULL,
+    pool_metadata TEXT,
     discovered_at INTEGER NOT NULL,
     safety_checked_at INTEGER,
     last_traded_at INTEGER,
@@ -133,21 +147,31 @@ export const getLatestSnapshot = (walletId) =>
     )
     .get(walletId);
 
+// Source preserves a launchpad-specific label even if a generic listener (e.g. uniswap V4
+// Initialize) fires later for the same token. Clanker / Doppler / Virtuals labels stick;
+// generic uniswap-vX labels yield to launchpad ones.
 export const upsertDiscoveredToken = (row) =>
   db
     .prepare(
       `INSERT INTO discovered_tokens
         (address, chain, symbol, decimals, tradeable_on, virtuals_state, source, status,
-         discovered_at, safety_checked_at, last_traded_at, ttl_expires_at)
+         pool_metadata, discovered_at, safety_checked_at, last_traded_at, ttl_expires_at)
        VALUES (@address, @chain, @symbol, @decimals, @tradeable_on, @virtuals_state, @source, @status,
-               @discovered_at, @safety_checked_at, @last_traded_at, @ttl_expires_at)
+               @pool_metadata, @discovered_at, @safety_checked_at, @last_traded_at, @ttl_expires_at)
        ON CONFLICT(address, chain) DO UPDATE SET
          symbol            = excluded.symbol,
          decimals          = excluded.decimals,
          tradeable_on      = excluded.tradeable_on,
          virtuals_state    = excluded.virtuals_state,
-         source            = excluded.source,
+         source            = CASE
+           WHEN discovered_tokens.source LIKE 'clanker-%'
+             OR discovered_tokens.source LIKE 'doppler-%'
+             OR discovered_tokens.source LIKE 'virtuals-%'
+           THEN discovered_tokens.source
+           ELSE excluded.source
+         END,
          status            = excluded.status,
+         pool_metadata     = COALESCE(excluded.pool_metadata, discovered_tokens.pool_metadata),
          safety_checked_at = excluded.safety_checked_at,
          last_traded_at    = COALESCE(excluded.last_traded_at, discovered_tokens.last_traded_at),
          ttl_expires_at    = excluded.ttl_expires_at`

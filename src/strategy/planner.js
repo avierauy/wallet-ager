@@ -28,13 +28,31 @@ const candidateTokensFor = (dex, tokens) =>
 
 const has = (balances, token) => (balances[token.address.toLowerCase()] ?? 0n) > 0n;
 
-export const planAction = ({ profile, tokens, balances, nativeBalance, rng }) => {
+export const planAction = ({ profile, tokens, balances, nativeBalance, rng, allowBuy = true }) => {
   const minNative = BigInt(profile.minNativeBalanceWei ?? "0");
   if (nativeBalance <= minNative) return null;
 
   const dex = sampleWeighted(profile.dexWeights, rng);
   const candidates = candidateTokensFor(dex, tokens);
   if (candidates.length === 0) return null;
+
+  // When the daily roundtrip cap is exhausted we can only sell — restrict to held tokens
+  // and force side="sell". If we hold nothing on this dex, this tick has no action.
+  if (!allowBuy) {
+    const heldCandidates = candidates.filter((t) => has(balances, t));
+    if (heldCandidates.length === 0) return null;
+    const token = samplePick(heldCandidates, rng);
+    const amountInWei = balances[token.address.toLowerCase()];
+    if (amountInWei <= 0n) return null;
+    return {
+      dex,
+      side: "sell",
+      token,
+      amountInWei,
+      slippageBps: sampleUniformInt(profile.slippageBps, rng),
+      gasMultiplier: sampleUniform(profile.gasMultiplierRange, rng),
+    };
+  }
 
   // Prefer tokens this wallet already holds for selling, to keep round-trip activity natural.
   const heldCandidates = candidates.filter((t) => has(balances, t));

@@ -15,9 +15,11 @@ const POOL = "0x" + "3".repeat(40);
 const INITIALIZER = "0x" + "9".repeat(40);
 
 const originalRead = rpc.publicClient.readContract;
+const originalSimulate = rpc.publicClient.simulateContract;
 const originalFetch = globalThis.fetch;
 const restore = () => {
   rpc.publicClient.readContract = originalRead;
+  rpc.publicClient.simulateContract = originalSimulate;
   globalThis.fetch = originalFetch;
 };
 
@@ -31,8 +33,15 @@ const stubReads = ({ symbol = "DOPPLER", decimals = 18, metadataThrows = false }
       if (metadataThrows) throw new Error("rpc down");
       return decimals;
     }
+    // V3 probe (token0/token1/fee) — fail so we fall through to V4 path
+    if (["token0", "token1", "fee"].includes(functionName)) {
+      throw new Error("not a V3 pool");
+    }
     throw new Error("unexpected readContract: " + functionName);
   };
+  // V4 Quoter probe — fail every candidate so handler falls back to pending=true.
+  // Tests that need a successful quote can override this stub themselves.
+  rpc.publicClient.simulateContract = async () => { throw new Error("PoolNotInitialized"); };
 };
 
 const stubHoneypot = (verdict) => {
@@ -98,13 +107,34 @@ describe("bankr airlock discovery", () => {
     assert.equal(result.added, true);
   });
 
-  test("honeypot flagged via post-Doppler safety check", async () => {
+  test("Doppler tokens skip honeypot probe — trusted launchpad template", async () => {
+    // Phase A: Doppler uses standard ERC20 templates with no rug surface. The discovery handler
+    // must NOT call honeypot.is and must register as ACTIVE regardless of any external verdict.
     stubReads({ symbol: "RUG" });
-    stubHoneypot(honeypotVerdict);
-    await handleAirlockCreate({
+    let fetchCalled = false;
+    globalThis.fetch = async () => { fetchCalled = true; return { ok: true, json: async () => honeypotVerdict }; };
+
+    const result = await handleAirlockCreate({
       asset: RUG_TOKEN, numeraire: WETH, initializer: INITIALIZER, poolOrHook: POOL,
     });
-    assert.ok(!getActive().some((t) => t.address.toLowerCase() === RUG_TOKEN.toLowerCase()));
-    assert.ok(_listAll().some((t) => t.address.toLowerCase() === RUG_TOKEN.toLowerCase()));
+
+    assert.equal(result.added, true);
+    assert.equal(fetchCalled, false, "honeypot.is must not be called for Doppler tokens");
+    const row = _listAll().find((t) => t.address.toLowerCase() === RUG_TOKEN.toLowerCase());
+    assert.ok(row, "token should be registered");
+    assert.ok(getActive().some((t) => t.address.toLowerCase() === RUG_TOKEN.toLowerCase()),
+      "token should appear in active list (bypass safety)");
+  });
+
+  test("poolMetadata is recorded with version + initializer hint", async () => {
+    stubReads({ symbol: "META" });
+    await handleAirlockCreate({
+      asset: NEW_TOKEN, numeraire: WETH, initializer: INITIALIZER, poolOrHook: POOL,
+    });
+    const row = _listAll().find((t) => t.address.toLowerCase() === NEW_TOKEN.toLowerCase());
+    assert.ok(row.poolMetadata, "poolMetadata should be persisted");
+    assert.equal(row.poolMetadata.version, "v4-or-v3");
+    assert.equal(row.poolMetadata.pending, true);
+    assert.equal(row.poolMetadata.poolOrHook?.toLowerCase(), POOL.toLowerCase());
   });
 });

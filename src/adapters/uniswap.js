@@ -7,6 +7,8 @@ import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
 import { ethersProvider } from "../util/ethersProvider.js";
 import { signPermitSingle } from "../util/permit2.js";
+import { buyDirect, isDirectSwappable, isSellDirectSwappable, sellDirect } from "./directSwap.js";
+import { logger } from "../util/logger.js";
 
 const require = createRequire(import.meta.url);
 const { CurrencyAmount, Ether, Percent, Token, TradeType } = require("@uniswap/sdk-core");
@@ -87,6 +89,32 @@ const submitRoute = async ({ account, route }) => {
 };
 
 export const buyExactEthForToken = async ({ account, tokenOut, amountInWei, slippageBps }) => {
+  // Fast path: fresh-launch token with full pool metadata → bypass AlphaRouter's subgraph
+  // (avoids "no route found" on pools the indexer hasn't picked up yet).
+  if (isDirectSwappable(tokenOut.poolMetadata)) {
+    try {
+      const r = await buyDirect({
+        account,
+        poolMetadata: tokenOut.poolMetadata,
+        amountInWei,
+        slippageBps,
+      });
+      logger.info(
+        { token: tokenOut.symbol, path: r.path, minOut: r.minOut.toString(), txHash: r.txHash },
+        "uniswap: direct swap submitted"
+      );
+      // Synthetic route shape so the executor's notifyTrade can still compute the output leg.
+      const syntheticRoute = { quote: { quotient: { toString: () => r.minOut.toString() } } };
+      return { txHash: r.txHash, route: syntheticRoute };
+    } catch (err) {
+      logger.warn(
+        { token: tokenOut.symbol, err: err.message },
+        "uniswap: directSwap failed — falling back to AlphaRouter"
+      );
+      // Falls through to AlphaRouter below.
+    }
+  }
+
   const route = await quote({
     tokenIn: { address: config.chain.nativeSentinel, decimals: 18, symbol: "ETH" },
     tokenOut,
@@ -98,6 +126,34 @@ export const buyExactEthForToken = async ({ account, tokenOut, amountInWei, slip
 };
 
 export const sellExactTokenForEth = async ({ account, tokenIn, amountInWei, slippageBps }) => {
+  // Fast path: token has V4 metadata captured at discovery time → bypass AlphaRouter (whose
+  // subgraph lag stalls sells for minutes on fresh launches) and swap directly via UR + V4.
+  // The directSwap adapter handles its own ERC20→Permit2 + Permit2→UR approvals.
+  if (isSellDirectSwappable(tokenIn.poolMetadata)) {
+    try {
+      const r = await sellDirect({
+        account,
+        poolMetadata: tokenIn.poolMetadata,
+        amountInWei,
+        slippageBps,
+      });
+      logger.info(
+        { token: tokenIn.symbol, path: r.path, minOut: r.minOut.toString(),
+          expectedOut: r.expectedOut.toString(), txHash: r.txHash,
+          approvals: r.approvals.length },
+        "uniswap: direct sell submitted"
+      );
+      const syntheticRoute = { quote: { quotient: { toString: () => r.expectedOut.toString() } } };
+      return { txHash: r.txHash, route: syntheticRoute };
+    } catch (err) {
+      logger.warn(
+        { token: tokenIn.symbol, err: err.message },
+        "uniswap: direct sell failed — falling back to AlphaRouter"
+      );
+      // Falls through to AlphaRouter below.
+    }
+  }
+
   const universalRouter = config.chain.dexes.uniswap.universalRouter;
   const wallet = walletClientFor(account);
 

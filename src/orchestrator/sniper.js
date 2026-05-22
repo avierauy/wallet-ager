@@ -8,8 +8,11 @@
 // sells are setTimeout-based: if the daemon restarts, in-flight sells are lost (the aging
 // scheduler will eventually sell residuals).
 import { erc20Abi } from "viem";
+import { config } from "../config.js";
 import { executeAction as defaultExecuteAction } from "../core/executor.js";
 import { publicClient as defaultPublicClient } from "../core/rpc.js";
+import { notifyError } from "../notify/telegram.js";
+import { canTrade, getDailyState, recordTrade } from "../strategy/dailyCounter.js";
 
 // Dependency injection — lets tests substitute executeAction + publicClient without touching
 // ESM module bindings. Production code uses the defaults.
@@ -51,6 +54,9 @@ const isEligible = (wallet, nowMs) => {
   if (!isWithinActiveHours(nowHour, wallet.profile.activeHoursUtc)) return false;
   const last = sniperState.get(wallet.id);
   if (last && nowMs - last.lastSnipeAt < sniper.cooldownMin * 60 * 1000) return false;
+  // Daily round-trip cap applies to BOTH sniper and aging flows — a buy consumes one slot
+  // regardless of source. Sells (scheduled or retried) never consume slots.
+  if (!canTrade({ wallet })) return false;
   return true;
 };
 
@@ -102,6 +108,12 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
   try {
     const result = await deps.executeAction({ wallet, plan });
     if (result.status === "submitted" || result.status === "dry-run") {
+      recordTrade({ wallet });
+      const remaining = getDailyState({ wallet })?.remaining;
+      logger.info(
+        { walletId: wallet.id, token: token.symbol, remainingTradesToday: remaining },
+        "sniper: round-trip slot consumed"
+      );
       const delayMin = sampleUniform(sniper.sellDelayMin, rng);
       scheduleSell({ wallet, token, delayMs: delayMin * 60 * 1000, sniper });
     }
@@ -113,13 +125,20 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
   }
 };
 
-const scheduleSell = ({ wallet, token, delayMs, sniper }) => {
+// Each failed sell schedules itself again after RETRY_INTERVAL_MS, up to MAX_SELL_ATTEMPTS
+// total tries (~2.5 min total with the defaults). Hook-blocked sells often clear on the
+// next block or two — instead of waiting for aging mode to randomly pick up the position,
+// we keep retrying within the sniper's own scheduler.
+const RETRY_INTERVAL_MS = 30_000;
+const MAX_SELL_ATTEMPTS = 5;
+
+const scheduleSell = ({ wallet, token, delayMs, sniper, attempt = 1 }) => {
   const key = `${wallet.id}:${token.address.toLowerCase()}`;
   const existing = pendingSells.get(key);
   if (existing) clearTimeout(existing);
 
   logger.info(
-    { walletId: wallet.id, token: token.symbol, delayMinutes: Math.round(delayMs / 60000) },
+    { walletId: wallet.id, token: token.symbol, delayMinutes: Math.round(delayMs / 60000), attempt },
     "sniper: sell scheduled"
   );
   inc("sniper", { outcome: "sell-scheduled" });
@@ -134,9 +153,10 @@ const scheduleSell = ({ wallet, token, delayMs, sniper }) => {
         args: [wallet.account.address],
       });
       if (balance === 0n) {
+        // Either DRY_RUN, or a prior retry succeeded — nothing to sell.
         logger.warn(
-          { walletId: wallet.id, token: token.symbol },
-          "sniper: scheduled sell — wallet holds 0 (likely DRY_RUN buy)"
+          { walletId: wallet.id, token: token.symbol, attempt },
+          "sniper: scheduled sell — wallet holds 0"
         );
         inc("sniper", { outcome: "sell-no-balance" });
         return;
@@ -148,19 +168,64 @@ const scheduleSell = ({ wallet, token, delayMs, sniper }) => {
         amountInWei: balance,
         slippageBps: sniper.sellSlippageBps,
         gasMultiplier: 1.2,
+        // Telegram-noise control: every retry attempt is silent on Telegram. We notify
+        // ONCE at the bottom of this block if all retries are exhausted, with a meaningful
+        // summary instead of per-attempt error spam.
+        silentOnFail: true,
       };
       logger.info(
-        { walletId: wallet.id, token: token.symbol, balance: balance.toString() },
+        { walletId: wallet.id, walletAddress: wallet.account.address,
+          token: token.symbol, balance: balance.toString(), attempt },
         "sniper: firing sell"
       );
       inc("sniper", { outcome: "sell-fire" });
-      await deps.executeAction({ wallet, plan });
+      const result = await deps.executeAction({ wallet, plan });
+      // Treat anything that did not actually broadcast as "needs another shot" — hooks are
+      // state-dependent so the next block may unblock the pool. Skipped (safety) and
+      // dry-run are terminal: nothing changes by retrying.
+      const succeeded = result?.status === "submitted" || result?.status === "dry-run";
+      const terminal = succeeded || result?.status === "skipped";
+      if (!terminal && attempt < MAX_SELL_ATTEMPTS) {
+        logger.info(
+          { walletId: wallet.id, token: token.symbol, attempt, nextAttempt: attempt + 1,
+            nextDelayMs: RETRY_INTERVAL_MS },
+          "sniper: sell failed — scheduling retry"
+        );
+        inc("sniper", { outcome: "sell-retry" });
+        scheduleSell({ wallet, token, delayMs: RETRY_INTERVAL_MS, sniper, attempt: attempt + 1 });
+      } else if (!terminal) {
+        logger.warn(
+          { walletId: wallet.id, walletAddress: wallet.account.address,
+            token: token.symbol, attempts: attempt },
+          "sniper: sell exhausted retries — leaving position for aging mode"
+        );
+        inc("sniper", { outcome: "sell-exhausted" });
+        notifyError({
+          walletId: wallet.id,
+          walletAddress: wallet.account.address,
+          dex: plan.dex,
+          error: `sell ${token.symbol} exhausted ${attempt} attempts — leaving position`,
+          explorer: config.chain.blockExplorer,
+        });
+      }
     } catch (err) {
       logger.error(
-        { walletId: wallet.id, token: token.symbol, err: err.message },
+        { walletId: wallet.id, walletAddress: wallet.account.address,
+          token: token.symbol, attempt, err: err.message },
         "sniper: scheduled sell failed"
       );
       inc("sniper", { outcome: "sell-error" });
+      if (attempt < MAX_SELL_ATTEMPTS) {
+        scheduleSell({ wallet, token, delayMs: RETRY_INTERVAL_MS, sniper, attempt: attempt + 1 });
+      } else {
+        notifyError({
+          walletId: wallet.id,
+          walletAddress: wallet.account.address,
+          dex: token.tradeableOn?.[0] ?? "uniswap",
+          error: `sell ${token.symbol} exhausted ${attempt} attempts (last error: ${err.message})`,
+          explorer: config.chain.blockExplorer,
+        });
+      }
     }
   }, delayMs);
 

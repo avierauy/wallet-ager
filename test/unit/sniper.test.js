@@ -7,6 +7,7 @@ import {
   initSniper,
   tryFireSniperBuy,
 } from "../../src/orchestrator/sniper.js";
+import { _resetAll as resetDailyCounter } from "../../src/strategy/dailyCounter.js";
 
 const TOKEN = {
   address: "0xa4a2e2ca3fbfe21aed83471d28b6f65a233c6e00",
@@ -56,8 +57,8 @@ const seededRng = (seed) => {
 };
 
 describe("sniper", () => {
-  beforeEach(() => { _stopAll(); _resetDeps(); });
-  afterEach(() => { _stopAll(); _resetDeps(); });
+  beforeEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); });
+  afterEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); });
 
   test("skipped when no wallets initialized", async () => {
     const result = await tryFireSniperBuy({ token: TOKEN });

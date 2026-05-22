@@ -84,8 +84,31 @@ const formatLeg = (leg) => {
   return `${fmt(leg.amountWei, leg.decimals)} ${leg.symbol}`;
 };
 
+// Render the wallet identification line: prefer the on-chain address (clickable Basescan
+// link) and fall back to the wallet id for callers that don't have the address handy.
+const renderWalletLine = ({ walletAddress, walletId, explorer }) => {
+  if (walletAddress && explorer) {
+    return `wallet: [\`${escapeMd(walletAddress)}\`](${explorer}/address/${walletAddress})`;
+  }
+  if (walletAddress) {
+    return `wallet: \`${escapeMd(walletAddress)}\``;
+  }
+  return `wallet: \`${escapeMd(walletId ?? "?")}\``;
+};
+
+// Render the tx hash line with a clickable explorer link and the FULL hash (no truncation —
+// the hash is high-value data the operator may want to copy verbatim).
+const renderHashLine = ({ txHash, explorer }) => {
+  if (!txHash) return null;
+  const linkLine = explorer
+    ? `[Open on ${escapeMd(explorerLabel(explorer))} ↗](${explorer}/tx/${txHash})`
+    : null;
+  return [`hash: \`${escapeMd(txHash)}\``, linkLine].filter(Boolean).join("\n");
+};
+
 export const notifyTrade = ({
   walletId,
+  walletAddress,
   dex,
   side,
   txHash,
@@ -98,27 +121,22 @@ export const notifyTrade = ({
 
   const lines = [
     `*${escapeMd(side.toUpperCase())}* on *${escapeMd(dex)}*`,
-    `wallet: \`${escapeMd(walletId)}\``,
+    renderWalletLine({ walletAddress, walletId, explorer }),
     `spent: ${escapeMd(formatLeg(inLeg) ?? "?")}`,
   ];
   if (outLeg) lines.push(`got:   ${escapeMd("~" + formatLeg(outLeg))}`);
-  if (txHash) {
-    const short = `${txHash.slice(0, 10)}…${txHash.slice(-6)}`;
-    lines.push(`hash:  \`${escapeMd(short)}\``);
-    if (explorer) {
-      lines.push(`[Open on ${escapeMd(explorerLabel(explorer))} ↗](${explorer}/tx/${txHash})`);
-    }
-  }
+  const hashBlock = renderHashLine({ txHash, explorer });
+  if (hashBlock) lines.push(hashBlock);
   return send(lines.join("\n"));
 };
 
-export const notifyError = ({ walletId, dex, error }) => {
+export const notifyError = ({ walletId, walletAddress, dex, error, explorer }) => {
   recordEvent("errors");
   if (!config.telegram.enabled || !config.telegram.notify.errors) return;
   return send(
     [
       `*ERROR* on *${escapeMd(dex)}*`,
-      `wallet: \`${escapeMd(walletId)}\``,
+      renderWalletLine({ walletAddress, walletId, explorer }),
       `msg:    ${escapeMd(error)}`,
     ].join("\n")
   );
@@ -126,6 +144,7 @@ export const notifyError = ({ walletId, dex, error }) => {
 
 export const notifyApproval = ({
   walletId,
+  walletAddress,
   tokenSymbol,
   decimals,
   amountWei,
@@ -143,17 +162,12 @@ export const notifyApproval = ({
 
   const lines = [
     `*APPROVE* ${escapeMd(tokenSymbol)}`,
-    `wallet:  \`${escapeMd(walletId)}\``,
+    renderWalletLine({ walletAddress, walletId, explorer }),
     `amount:  ${escapeMd(amountText)}`,
     `spender: ${escapeMd(spenderText)}`,
   ];
-  if (txHash) {
-    const short = `${txHash.slice(0, 10)}…${txHash.slice(-6)}`;
-    lines.push(`hash:    \`${escapeMd(short)}\``);
-    if (explorer) {
-      lines.push(`[Open on ${escapeMd(explorerLabel(explorer))} ↗](${explorer}/tx/${txHash})`);
-    }
-  }
+  const hashBlock = renderHashLine({ txHash, explorer });
+  if (hashBlock) lines.push(hashBlock);
   return send(lines.join("\n"));
 };
 

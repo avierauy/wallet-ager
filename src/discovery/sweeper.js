@@ -100,6 +100,8 @@ export const sweepOnce = async ({ now = Date.now(), ttlHours = config.discovery.
           token: {
             address: token.address, symbol: token.symbol, decimals: token.decimals,
             tradeableOn: token.tradeableOn,
+            source: token.source,
+            poolMetadata: token.poolMetadata,
           },
         }).catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
       } else {

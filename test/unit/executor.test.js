@@ -68,4 +68,53 @@ describe("executeAction (DRY_RUN env, fetch-stubbed safety)", () => {
     assert.equal(row.token_out.toLowerCase(), TOKEN.address.toLowerCase());
     assert.equal(row.amount_in, PLAN_BUY.amountInWei.toString());
   });
+
+  test("trusted launchpad source bypasses safety probe (clanker)", async () => {
+    // Stub fetch to detect any safety call. honeypot/simulation must NOT be hit.
+    let fetchCalled = false;
+    globalThis.fetch = async () => { fetchCalled = true; return { ok: true, json: async () => honeypotResponse }; };
+
+    const launchpadPlan = {
+      ...PLAN_BUY,
+      token: { ...TOKEN, source: "clanker-v4" },
+    };
+    const result = await executeAction({ wallet: WALLET, plan: launchpadPlan });
+    assert.equal(result.status, "dry-run", "trusted launchpad buy should pass straight to dry-run");
+    assert.equal(fetchCalled, false, "safety probe must not run for clanker- source");
+  });
+
+  test("trusted launchpad SELL also bypasses safety (mirrors buy)", async () => {
+    // checkBeforeSell uses AlphaRouter which lags the subgraph on fresh launches; bypassing
+    // is required for the scheduled sniper sells to actually execute. Template guarantees
+    // no rug surface, hook-blocking is caught at Quoter time inside directSwap.
+    let fetchCalled = false;
+    globalThis.fetch = async () => { fetchCalled = true; return { ok: true, json: async () => honeypotResponse }; };
+    const sellPlan = {
+      ...PLAN_BUY,
+      side: "sell",
+      token: { ...TOKEN, source: "clanker-v4" },
+    };
+    const result = await executeAction({ wallet: WALLET, plan: sellPlan });
+    assert.equal(result.status, "dry-run", "launchpad sell should bypass safety and reach dry-run");
+    assert.equal(fetchCalled, false, "safety probe must not run for clanker- source");
+  });
+
+  test("doppler- and virtuals- prefixes also bypass safety on buy", async () => {
+    let fetchCalled = false;
+    globalThis.fetch = async () => { fetchCalled = true; return { ok: true, json: async () => honeypotResponse }; };
+
+    for (const source of ["doppler-bankr", "doppler-unknown", "virtuals-Launched"]) {
+      const plan = { ...PLAN_BUY, token: { ...TOKEN, source } };
+      const result = await executeAction({ wallet: WALLET, plan });
+      assert.equal(result.status, "dry-run", `source=${source} should bypass safety`);
+    }
+    assert.equal(fetchCalled, false, "no source-bypassed buy should hit the safety probe");
+  });
+
+  test("non-launchpad source (uniswap-v3-fee3000) still runs safety", async () => {
+    stubFetch(honeypotResponse);
+    const plan = { ...PLAN_BUY, token: { ...TOKEN, source: "uniswap-v3-fee3000" } };
+    const result = await executeAction({ wallet: WALLET, plan });
+    assert.equal(result.status, "skipped", "generic uniswap discovery must still be safety-checked");
+  });
 });

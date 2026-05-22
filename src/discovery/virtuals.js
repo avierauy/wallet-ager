@@ -4,7 +4,6 @@ import { config } from "../config.js";
 import { publicClient } from "../core/rpc.js";
 import { add, markExpired, STATUS } from "../core/tokenRegistry.js";
 import { tryFireSniperBuy } from "../orchestrator/sniper.js";
-import { checkBondingCurve } from "../safety/virtuals.js";
 import { logger } from "../util/logger.js";
 
 // Use the BaseScan-fetched ABI so the complex `launchParams` tuple is decoded automatically.
@@ -37,12 +36,11 @@ export const handleLaunched = async ({ token }) => {
   const meta = await fetchMetadata(token);
   if (!meta) return { skipped: "no-metadata" };
 
-  const safety = await checkBondingCurve({ agentToken: token });
-  const status = safety.pending
-    ? STATUS.PENDING
-    : safety.safe
-      ? STATUS.ACTIVE
-      : STATUS.UNSAFE;
+  // Virtuals tokens follow the protocol's standard template — no rug surface. The bonding
+  // curve is the trading venue and is operated by the protocol contracts directly. Skip the
+  // safety probe and mark ACTIVE so the sniper fires immediately via the virtuals adapter
+  // (BondingV5.buy is direct on-chain, no subgraph dependency).
+  const status = STATUS.ACTIVE;
   add({
     address: token,
     symbol: meta.symbol,
@@ -53,17 +51,18 @@ export const handleLaunched = async ({ token }) => {
     status,
   });
   logger.info(
-    { token, symbol: meta.symbol, status, safetyReasons: safety.reasons },
+    { token, symbol: meta.symbol, status },
     "virtuals: token discovery resolved"
   );
 
-  if (status === STATUS.ACTIVE) {
-    tryFireSniperBuy({
-      token: { address: token, symbol: meta.symbol, decimals: meta.decimals, tradeableOn: ["virtuals"] },
-    }).catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
-  }
+  tryFireSniperBuy({
+    token: {
+      address: token, symbol: meta.symbol, decimals: meta.decimals,
+      tradeableOn: ["virtuals"], source: "virtuals-Launched",
+    },
+  }).catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
 
-  return { added: true, status, safety };
+  return { added: true, status };
 };
 
 export const handleGraduated = ({ token }) => {

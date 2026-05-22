@@ -14,9 +14,10 @@ import { config } from "../config.js";
 import { publicClient } from "../core/rpc.js";
 import { _listAll, add, STATUS } from "../core/tokenRegistry.js";
 import { tryFireSniperBuy } from "../orchestrator/sniper.js";
-import { checkToken } from "../safety/index.js";
 import { logger } from "../util/logger.js";
 import { tokenHasExistingPools } from "./poolExistence.js";
+import { detectV3Pool, resolveV4PoolKeyViaQuoter } from "./v4PoolKey.js";
+import { startV4Poll } from "./v4Poller.js";
 
 const AirlockCreate = parseAbiItem(
   "event Create(address asset, address indexed numeraire, address initializer, address poolOrHook)"
@@ -77,31 +78,123 @@ export const handleAirlockCreate = async ({ asset, numeraire, initializer, poolO
   const meta = await fetchMetadata(asset);
   if (!meta) return { skipped: "no-metadata" };
 
-  const safety = await checkToken(asset);
-  const status = safety.pending
-    ? STATUS.PENDING
-    : safety.safe
-      ? STATUS.ACTIVE
-      : STATUS.UNSAFE;
+  // Doppler launches use standard ERC20 templates — the token contract itself has no rug
+  // surface. The V4 hook may have an anti-snipe window, but that's a delay not a hazard.
+  // Skip safety and mark ACTIVE so the sniper fires; revert losses on hook-blocked phases
+  // are limited to gas estimation since eth_estimateGas fails before broadcast.
+  const status = STATUS.ACTIVE;
   const source = `doppler-${labelForInitializer(initializer)}`;
-  add({
-    address: asset,
-    symbol: meta.symbol,
-    decimals: meta.decimals,
-    tradeableOn: ["uniswap"],
-    source,
-    status,
+
+  // Resolve the actual pool topology so directSwap can fire without AlphaRouter.
+  // `poolOrHook` is either a V3 pool address or a V4 hook. Probe V3 first (cheap, 3 reads);
+  // if that reverts assume V4 and brute-force the PoolKey via Quoter. If even Quoter rejects
+  // (hook MEV window, uninitialized, unknown config), start a background poll that retries
+  // until either the pool accepts or the timeout fires.
+
+  const baseToken = {
+    address: asset, symbol: meta.symbol, decimals: meta.decimals,
+    tradeableOn: ["uniswap"], source,
+  };
+  const fireSniper = (poolMetadata, reason) => {
+    if (reason) {
+      logger.info({ asset, symbol: meta.symbol, reason }, "doppler: firing sniper after poll");
+    }
+    tryFireSniperBuy({ token: { ...baseToken, poolMetadata } })
+      .catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
+  };
+
+  const v3Probe = await detectV3Pool({ poolAddress: poolOrHook, publicClient });
+  if (v3Probe) {
+    const poolMetadata = {
+      version: "v3",
+      pool: v3Probe.pool,
+      fee: v3Probe.fee,
+      token0: v3Probe.token0,
+      token1: v3Probe.token1,
+    };
+    add({ ...baseToken, status, poolMetadata });
+    logger.info(
+      { asset, symbol: meta.symbol, status, source, initializer, poolOrHook,
+        poolVersion: "v3", poolKeyResolved: true },
+      "doppler: discovery resolved"
+    );
+    fireSniper(poolMetadata);
+    return { added: true, status, source, initializer, poolOrHook };
+  }
+
+  // V3 probe failed → it's a V4 hook. Try the full Quoter brute-force.
+  const v4Match = await resolveV4PoolKeyViaQuoter({
+    tokenIn: numeraire, tokenOut: asset, hooks: poolOrHook,
+    publicClient, quoter: config.chain.dexes.uniswap.v4Quoter,
   });
+
+  if (v4Match) {
+    const poolMetadata = {
+      version: "v4",
+      poolId: v4Match.poolId,
+      currency0: v4Match.currency0,
+      currency1: v4Match.currency1,
+      fee: v4Match.fee,
+      tickSpacing: v4Match.tickSpacing,
+      hooks: v4Match.hooks,
+    };
+    add({ ...baseToken, status, poolMetadata });
+    logger.info(
+      { asset, symbol: meta.symbol, status, source, initializer, poolOrHook,
+        poolVersion: "v4", poolKeyResolved: true,
+        fee: v4Match.fee, tickSpacing: v4Match.tickSpacing },
+      "doppler: discovery resolved"
+    );
+    fireSniper(poolMetadata);
+    return { added: true, status, source, initializer, poolOrHook };
+  }
+
+  // Neither V3 nor an initial V4 candidate quote returned. Register as pending and start a
+  // background poll: retry the full V4 brute-force every ~5s until the hook lets us in or
+  // we time out. AlphaRouter is not invoked in this path — the sniper only fires from
+  // the poll's onReady callback.
+  const pendingMetadata = {
+    version: "v4-or-v3", poolOrHook, pairedToken: numeraire,
+    tokenAddress: asset, pending: true,
+  };
+  add({ ...baseToken, status, poolMetadata: pendingMetadata });
   logger.info(
-    { asset, symbol: meta.symbol, status, source, initializer, poolOrHook },
-    "doppler: discovery resolved"
+    { asset, symbol: meta.symbol, status, source, initializer, poolOrHook,
+      poolVersion: "v4-or-v3", poolKeyResolved: false },
+    "doppler: discovery resolved (polling will retry)"
   );
 
-  if (status === STATUS.ACTIVE) {
-    tryFireSniperBuy({
-      token: { address: asset, symbol: meta.symbol, decimals: meta.decimals, tradeableOn: ["uniswap"] },
-    }).catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
-  }
+  startV4Poll({
+    probe: async (attempt) => {
+      const m = await resolveV4PoolKeyViaQuoter({
+        tokenIn: numeraire, tokenOut: asset, hooks: poolOrHook,
+        publicClient, quoter: config.chain.dexes.uniswap.v4Quoter,
+      });
+      if (m) return { attempt, match: m };
+      return null;
+    },
+    onReady: ({ match }, attempts) => {
+      const poolMetadata = {
+        version: "v4",
+        poolId: match.poolId,
+        currency0: match.currency0, currency1: match.currency1,
+        fee: match.fee, tickSpacing: match.tickSpacing, hooks: match.hooks,
+      };
+      add({ ...baseToken, status, poolMetadata });
+      logger.info(
+        { asset, symbol: meta.symbol, attempts, fee: match.fee, tickSpacing: match.tickSpacing,
+          probeAmountOut: match.probeAmountOut?.toString() },
+        "doppler: pool became tradeable — firing sniper"
+      );
+      fireSniper(poolMetadata, "poll-success");
+    },
+    onTimeout: (attempts) => {
+      logger.warn(
+        { asset, symbol: meta.symbol, attempts },
+        "doppler: Quoter never accepted after polling — sniper skipped"
+      );
+    },
+  });
 
   return { added: true, status, source, initializer, poolOrHook };
 };

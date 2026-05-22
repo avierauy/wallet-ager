@@ -10,7 +10,8 @@ const sim = await import("../../src/safety/simulation.js");
 const { handleTokenCreated } = await import("../../src/discovery/clanker.js");
 
 const WETH = "0x4200000000000000000000000000000000000006";
-const TOKEN = "0xCC11ABCDef0123456789ABCDef0123456789ABCD";
+// All-lowercase to skip viem's EIP-55 checksum validation in encodeAbiParameters
+const TOKEN = "0xcc11abcdef0123456789abcdef0123456789abcd";
 const POOL_ID = "0xaaa1111111111111111111111111111111111111111111111111111111111111";
 const POOL_HOOK = "0x0000000000000000000000000000000000000000";
 

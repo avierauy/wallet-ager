@@ -8,5 +8,6 @@ config/wallets.json.bak
 config/tokens.json
 *.log
 *.bak
+*.bak-pre-broadcast
 .DS_Store
 .claude/
