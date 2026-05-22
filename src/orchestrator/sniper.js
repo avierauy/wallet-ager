@@ -81,8 +81,11 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
   const amountEth = sampleUniform(ethRange, rng);
   const amountInWei = ethFloatToWei(amountEth);
 
+  // Pick the dex from the token's tradeableOn — virtuals pre-grad tokens need adapter "virtuals"
+  // (BondingV5), uniswap-routed tokens need "uniswap". Defaults to uniswap if absent.
+  const dex = token.tradeableOn?.[0] ?? "uniswap";
   const plan = {
-    dex: "uniswap",
+    dex,
     side: "buy",
     token,
     amountInWei,
@@ -139,7 +142,7 @@ const scheduleSell = ({ wallet, token, delayMs, sniper }) => {
         return;
       }
       const plan = {
-        dex: "uniswap",
+        dex: token.tradeableOn?.[0] ?? "uniswap",
         side: "sell",
         token,
         amountInWei: balance,

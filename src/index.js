@@ -4,6 +4,7 @@ import "./core/db.js"; // trigger schema init
 import { getActive as getActiveTokens } from "./core/tokenRegistry.js";
 import { loadWallets } from "./core/wallets.js";
 import { startBankrDiscovery, stopBankrDiscovery } from "./discovery/bankr.js";
+import { startClankerDiscovery, stopClankerDiscovery } from "./discovery/clanker.js";
 import { startSweeper, stopSweeper } from "./discovery/sweeper.js";
 import { startUniswapDiscovery, stopUniswapDiscovery } from "./discovery/uniswap.js";
 import { startVirtualsDiscovery, stopVirtualsDiscovery } from "./discovery/virtuals.js";
@@ -72,6 +73,7 @@ async function main() {
   startVirtualsDiscovery();
   startUniswapDiscovery();
   startBankrDiscovery();
+  startClankerDiscovery();
   startSweeper();
 
   const shutdown = async (sig) => {
@@ -79,6 +81,7 @@ async function main() {
     stopVirtualsDiscovery();
     stopUniswapDiscovery();
     stopBankrDiscovery();
+    stopClankerDiscovery();
     stopSweeper();
     stopSniper();
     if (config.telegram.enabled) {

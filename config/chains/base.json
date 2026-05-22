@@ -21,8 +21,16 @@
     "bankr": {
       "kind": "zeroex-allowance-holder",
       "settler": "0x0000000000001ff3684f28c67538d4d072c22734",
-      "apiBase": "https://api.0x.org/swap/allowance-holder",
-      "airlock": "0x660eAaedEBc968f8f3694354FA8EC0b4c5Ba8D12"
+      "apiBase": "https://api.0x.org/swap/allowance-holder"
+    },
+    "doppler": {
+      "airlock": "0x660eAaedEBc968f8f3694354FA8EC0b4c5Ba8D12",
+      "knownInitializers": {
+        "0x65dE470Da664A5be139A5D812bE5FDa0d76CC951": "bankr"
+      }
+    },
+    "clanker": {
+      "factory": "0xE85A59c628F7d27878ACeB4bf3b35733630083a9"
     },
     "virtuals": {
       "kind": "virtuals",

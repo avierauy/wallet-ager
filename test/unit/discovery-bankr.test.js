@@ -75,7 +75,7 @@ describe("bankr airlock discovery", () => {
     assert.equal(touched, false);
   });
 
-  test("WETH numeraire + safe token registered with source=bankr-airlock", async () => {
+  test("WETH numeraire + safe token registered with doppler-* source", async () => {
     stubReads({ symbol: "BNKR" });
     stubHoneypot(safeVerdict);
     const result = await handleAirlockCreate({
@@ -84,7 +84,8 @@ describe("bankr airlock discovery", () => {
     assert.equal(result.added, true);
     const row = _listAll().find((t) => t.address.toLowerCase() === NEW_TOKEN.toLowerCase());
     assert.ok(row);
-    assert.equal(row.source, "bankr-airlock");
+    // Initializer is unknown to the test config, so it should land as doppler-unknown.
+    assert.equal(row.source, "doppler-unknown");
     assert.deepEqual(row.tradeableOn, ["uniswap"]);
   });
 
