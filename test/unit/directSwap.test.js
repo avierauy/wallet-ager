@@ -49,11 +49,12 @@ describe("directSwap", () => {
   });
 
   describe("isSellDirectSwappable", () => {
-    test("only v4 (non-pending) is currently supported on the sell path", () => {
+    test("v3 and v4 (non-pending) are supported on the sell path", () => {
       assert.equal(isSellDirectSwappable({ version: "v4" }), true);
-      assert.equal(isSellDirectSwappable({ version: "v3" }), false);
+      assert.equal(isSellDirectSwappable({ version: "v3" }), true);
       assert.equal(isSellDirectSwappable({ version: "v2" }), false);
       assert.equal(isSellDirectSwappable({ version: "v4", pending: true }), false);
+      assert.equal(isSellDirectSwappable({ version: "v3", pending: true }), false);
       assert.equal(isSellDirectSwappable(null), false);
     });
   });
@@ -66,10 +67,10 @@ describe("directSwap", () => {
         /poolMetadata is required/
       );
     });
-    test("throws on non-v4 (V2/V3 sell not wired yet)", async () => {
+    test("throws on unsupported version (V2 sell not wired)", async () => {
       await assert.rejects(
-        sellDirect({ account: ACCOUNT, poolMetadata: { version: "v3" }, amountInWei: 1n, slippageBps: 100 }),
-        /only v4 is supported/
+        sellDirect({ account: ACCOUNT, poolMetadata: { version: "v2" }, amountInWei: 1n, slippageBps: 100 }),
+        /unsupported version/
       );
     });
   });

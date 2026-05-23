@@ -9,6 +9,7 @@ import { startSweeper, stopSweeper } from "./discovery/sweeper.js";
 import { startUniswapDiscovery, stopUniswapDiscovery } from "./discovery/uniswap.js";
 import { startVirtualsDiscovery, stopVirtualsDiscovery } from "./discovery/virtuals.js";
 import { notifyInfo, startBatchTimer } from "./notify/telegram.js";
+import { startDailyCleanup, stopDailyCleanup } from "./orchestrator/dailyCleanup.js";
 import { startWalletLoop } from "./orchestrator.js";
 import { initSniper, _stopAll as stopSniper } from "./orchestrator/sniper.js";
 import { logger } from "./util/logger.js";
@@ -75,6 +76,7 @@ async function main() {
   startBankrDiscovery();
   startClankerDiscovery();
   startSweeper();
+  startDailyCleanup({ wallets });
 
   const shutdown = async (sig) => {
     logger.info({ sig }, "shutdown signal — exiting");
@@ -84,6 +86,7 @@ async function main() {
     stopClankerDiscovery();
     stopSweeper();
     stopSniper();
+    stopDailyCleanup();
     if (config.telegram.enabled) {
       try { await notifyInfo(`wallet-ager shutting down (${sig})`); } catch {}
     }

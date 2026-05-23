@@ -96,6 +96,14 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_discovered_status ON discovered_tokens(status, chain);
 
+  CREATE TABLE IF NOT EXISTS daily_allowances (
+    wallet_id TEXT NOT NULL,
+    date TEXT NOT NULL,
+    allowance INTEGER NOT NULL,
+    sampled_at INTEGER NOT NULL,
+    PRIMARY KEY (wallet_id, date)
+  );
+
   CREATE TABLE IF NOT EXISTS token_safety (
     token TEXT COLLATE NOCASE NOT NULL,
     chain TEXT NOT NULL,
@@ -235,4 +243,41 @@ export const updateTrade = (id, patch) => {
   const cols = Object.keys(patch);
   const sql = `UPDATE trades SET ${cols.map((c) => `${c} = @${c}`).join(", ")} WHERE id = @id`;
   db.prepare(sql).run({ ...patch, id });
+};
+
+// --- Daily allowance persistence -------------------------------------------------
+// `used` count for a wallet on `date` is always derived live from the trades table —
+// authoritative single source of truth. We persist only the sampled allowance so the
+// cap stays stable across daemon restarts within the same UTC day.
+
+export const getDailyAllowance = ({ wallet_id, date }) =>
+  db
+    .prepare(`SELECT allowance FROM daily_allowances WHERE wallet_id = ? AND date = ?`)
+    .get(wallet_id, date)?.allowance ?? null;
+
+export const upsertDailyAllowance = ({ wallet_id, date, allowance, sampled_at = Date.now() }) =>
+  db
+    .prepare(
+      `INSERT OR REPLACE INTO daily_allowances (wallet_id, date, allowance, sampled_at)
+       VALUES (?, ?, ?, ?)`
+    )
+    .run(wallet_id, date, allowance, sampled_at);
+
+// Count buys that were actually broadcast (status='submitted') by this wallet on the
+// given UTC date. Aging-mode + sniper buys all flow through insertTrade so this captures
+// both. Dry-run trades are also marked 'submitted' from the executor's perspective and
+// should count toward the daily cap.
+export const countSubmittedBuysOnDate = ({ wallet_id, date }) => {
+  // SQLite has no native UTC date helper from a millisecond epoch — convert in SQL:
+  // (created_at / 1000) is unix seconds; strftime('%Y-%m-%d', ., 'unixepoch') gives UTC.
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM trades
+       WHERE wallet_id = ?
+         AND side = 'buy'
+         AND status IN ('submitted', 'dry-run')
+         AND strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') = ?`
+    )
+    .get(wallet_id, date);
+  return row?.n ?? 0;
 };

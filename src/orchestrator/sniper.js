@@ -132,7 +132,10 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
 const RETRY_INTERVAL_MS = 30_000;
 const MAX_SELL_ATTEMPTS = 5;
 
-const scheduleSell = ({ wallet, token, delayMs, sniper, attempt = 1 }) => {
+// Exported so the aging-mode orchestrator can reuse the same retry mechanism after one of
+// its own sells fails — see src/orchestrator.js. Both flows then share the 5×30s retry
+// surface and the silent-on-fail Telegram suppression until exhaustion.
+export const scheduleSell = ({ wallet, token, delayMs, sniper, attempt = 1 }) => {
   const key = `${wallet.id}:${token.address.toLowerCase()}`;
   const existing = pendingSells.get(key);
   if (existing) clearTimeout(existing);

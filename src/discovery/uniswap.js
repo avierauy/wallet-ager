@@ -16,7 +16,7 @@
 import { parseAbi, parseAbiItem } from "viem";
 import { config } from "../config.js";
 import { publicClient } from "../core/rpc.js";
-import { add, STATUS } from "../core/tokenRegistry.js";
+import { _listAll, add, STATUS } from "../core/tokenRegistry.js";
 import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { checkToken } from "../safety/index.js";
 import { logger } from "../util/logger.js";
@@ -92,7 +92,42 @@ const fetchV3Liquidity = async (pool) => {
   } catch { return 0n; }
 };
 
+const isLaunchpadSource = (s) => /^(clanker-|doppler-|virtuals-)/.test(s ?? "");
+
 const registerIfFirstAndSafe = async ({ tokenAddr, source, excludePool, poolMetadata, extra = {} }) => {
+  // Launchpad correlation: if a Clanker/Doppler/Virtuals discovery already registered this
+  // token (pending poolMetadata waiting for the V4 PoolKey), the current V4 Initialize event
+  // gives us the full key. Enrich the registry entry, preserve the launchpad source +
+  // ACTIVE status, and fire the sniper immediately. Skip the safety probe entirely (the
+  // template guarantees this) and the first-listing filter (it would block correctly but
+  // we want to update poolMetadata regardless).
+  const prior = _listAll().find((t) => t.address.toLowerCase() === tokenAddr.toLowerCase());
+  if (prior && isLaunchpadSource(prior.source) && prior.poolMetadata?.pending) {
+    add({
+      address: tokenAddr,
+      symbol: prior.symbol,
+      decimals: prior.decimals,
+      tradeableOn: prior.tradeableOn,
+      virtualsState: prior.virtualsState,
+      source: prior.source,
+      status: STATUS.ACTIVE,
+      poolMetadata, // the V4 Initialize handler supplied the full PoolKey
+    });
+    logger.info(
+      { token: tokenAddr, symbol: prior.symbol, source: prior.source,
+        priorPending: true, enrichedFrom: source, ...extra },
+      "uniswap: enriched launchpad token from V4 Initialize — firing sniper"
+    );
+    tryFireSniperBuy({
+      token: {
+        address: tokenAddr, symbol: prior.symbol, decimals: prior.decimals,
+        tradeableOn: prior.tradeableOn ?? ["uniswap"],
+        source: prior.source, poolMetadata,
+      },
+    }).catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
+    return { added: true, status: STATUS.ACTIVE, correlatedFrom: prior.source };
+  }
+
   // First-listing filter: skip if the token already has a tradeable pool elsewhere.
   // This event is then "yet another pool for an established token", not a fresh launch.
   const existing = await tokenHasExistingPools({ tokenAddr, excludePool });

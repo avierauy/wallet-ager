@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { fetchBalances } from "./core/balances.js";
 import { executeAction } from "./core/executor.js";
 import { getActive as getActiveTokens } from "./core/tokenRegistry.js";
+import { scheduleSell } from "./orchestrator/sniper.js";
 import { canTrade, getDailyState, recordTrade } from "./strategy/dailyCounter.js";
 import { planAction } from "./strategy/planner.js";
 import { initialDelayMs, isWithinActiveHours, nextDelayMs } from "./strategy/scheduler.js";
@@ -62,6 +63,19 @@ export const runOneTick = async ({ wallet, rng, tokens }) => {
   const result = await executeAction({ wallet, plan });
   if (plan.side === "buy" && (result.status === "submitted" || result.status === "dry-run")) {
     recordTrade({ wallet, rng });
+  }
+  // Aging-mode sell that didn't broadcast → hand it off to the sniper's retry scheduler so
+  // the position doesn't sit until the next aging tick (which is minutes-to-hours away).
+  // Sells never consume daily slots so we can keep retrying without affecting the cap.
+  if (plan.side === "sell" && result.status === "failed") {
+    const sniper = wallet.profile.sniper ?? {};
+    logger.info(
+      { walletId: wallet.id, token: plan.token.symbol },
+      "aging-mode sell failed — handing off to retry scheduler"
+    );
+    scheduleSell({
+      wallet, token: plan.token, delayMs: 30_000, sniper, attempt: 2,
+    });
   }
   return result;
 };

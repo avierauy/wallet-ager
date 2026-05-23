@@ -364,6 +364,84 @@ export const sellV4Direct = async ({ account, poolMetadata, amountInWei, slippag
   return { txHash, minOut: usedMinOut, expectedOut: q.amountOut, path: "v4-direct-sell", approvals };
 };
 
+// ---- V3 sell (token → ETH) -------------------------------------------------
+
+// V3 QuoterV2 (deployed at config.chain.dexes.uniswap.quoterV2). Same revert-with-data
+// pattern as the V4 Quoter — call via simulateContract.
+const V3_QUOTERV2_ABI = parseAbi([
+  "struct QuoteExactInputSingleParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }",
+  "function quoteExactInputSingle(QuoteExactInputSingleParams params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)",
+]);
+
+const quoteV3Pool = async ({ tokenIn, tokenOut, fee, amountIn, publicClient: client, quoter }) => {
+  try {
+    const r = await client.simulateContract({
+      address: quoter, abi: V3_QUOTERV2_ABI, functionName: "quoteExactInputSingle",
+      args: [{ tokenIn, tokenOut, amountIn, fee: Number(fee), sqrtPriceLimitX96: 0n }],
+    });
+    return { amountOut: r.result[0], gasEstimate: r.result[3] };
+  } catch {
+    return null;
+  }
+};
+
+export const sellV3Direct = async ({ account, poolMetadata, amountInWei, slippageBps }) => {
+  const { pool, fee, token0, token1 } = poolMetadata;
+  const WETH = config.chain.wnative;
+  const wethLower = WETH.toLowerCase();
+  const t0Lower = token0.toLowerCase();
+  if (t0Lower !== wethLower && token1.toLowerCase() !== wethLower) {
+    throw new Error("sellV3Direct: pool has no WETH side");
+  }
+  const tokenIn = t0Lower === wethLower ? token1 : token0;
+  const tokenOut = WETH;
+
+  const approvals = await ensureSellApprovals({ account, token: tokenIn });
+
+  const q = await quoteV3Pool({
+    tokenIn, tokenOut, fee, amountIn: amountInWei,
+    publicClient, quoter: config.chain.dexes.uniswap.quoterV2,
+  });
+  if (!q || q.amountOut === 0n) {
+    throw new Error("sellV3Direct: Quoter rejected the swap (no liquidity or path)");
+  }
+  const effectiveSlippage = Math.max(slippageBps, MIN_SELL_SLIPPAGE_BPS);
+  const slippageMinOut = applySlippage(q.amountOut, effectiveSlippage);
+
+  // V3 swap path: tokenIn (20 bytes) + fee (3 bytes) + WETH (20 bytes) — single hop.
+  const feeHex = Number(fee).toString(16).padStart(6, "0");
+  const path = `0x${tokenIn.slice(2).toLowerCase()}${feeHex}${WETH.slice(2).toLowerCase()}`;
+
+  const buildAndSubmit = async (minOut) => {
+    const planner = new RoutePlanner();
+    // payerIsUser=true → UR pulls tokens via Permit2 (we pre-approved)
+    // recipient = ROUTER_AS_RECIPIENT so UNWRAP_WETH can convert + forward
+    planner.addCommand(CommandType.V3_SWAP_EXACT_IN, [
+      ROUTER_AS_RECIPIENT,
+      amountInWei.toString(),
+      minOut.toString(),
+      path,
+      true, // payerIsUser
+      [],   // minHopPriceX36 — empty
+    ], false, UR_VERSION);
+    planner.addCommand(CommandType.UNWRAP_WETH, [account.address, "0"], false, UR_VERSION);
+
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 1800);
+    const data = buildExecuteCalldata(planner, deadline);
+    return submitUR({ account, calldata: data, value: 0n });
+  };
+
+  let txHash;
+  let usedMinOut = slippageMinOut;
+  try {
+    txHash = await buildAndSubmit(slippageMinOut);
+  } catch (err) {
+    usedMinOut = 0n;
+    txHash = await buildAndSubmit(0n);
+  }
+  return { txHash, minOut: usedMinOut, expectedOut: q.amountOut, path: "v3-direct-sell", approvals };
+};
+
 // ---- dispatcher -------------------------------------------------------------
 
 export const isDirectSwappable = (poolMetadata) => {
@@ -371,11 +449,11 @@ export const isDirectSwappable = (poolMetadata) => {
   return ["v2", "v3", "v4"].includes(poolMetadata.version);
 };
 
-// Sell-direction direct swap is currently only wired for V4 (which is where Clanker/Doppler
-// + most fresh-launch volume lives). Callers should check this before invoking sellDirect.
+// Sell-direction direct swap is wired for V3 and V4 — covers all fresh-launch volume on
+// Base (Clanker/Doppler V4 + occasional V3 pool from generic factory events).
 export const isSellDirectSwappable = (poolMetadata) => {
   if (!poolMetadata || poolMetadata.pending) return false;
-  return poolMetadata.version === "v4";
+  return poolMetadata.version === "v3" || poolMetadata.version === "v4";
 };
 
 export const buyDirect = async ({ account, poolMetadata, amountInWei, slippageBps }) => {
@@ -390,8 +468,9 @@ export const buyDirect = async ({ account, poolMetadata, amountInWei, slippageBp
 
 export const sellDirect = async ({ account, poolMetadata, amountInWei, slippageBps }) => {
   if (!poolMetadata) throw new Error("sellDirect: poolMetadata is required");
-  if (poolMetadata.version !== "v4") {
-    throw new Error(`sellDirect: only v4 is supported (got ${poolMetadata.version})`);
+  switch (poolMetadata.version) {
+    case "v3": return sellV3Direct({ account, poolMetadata, amountInWei, slippageBps });
+    case "v4": return sellV4Direct({ account, poolMetadata, amountInWei, slippageBps });
+    default: throw new Error(`sellDirect: unsupported version ${poolMetadata.version}`);
   }
-  return sellV4Direct({ account, poolMetadata, amountInWei, slippageBps });
 };
