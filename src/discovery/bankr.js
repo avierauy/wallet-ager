@@ -11,8 +11,9 @@
 // Uniswap adapter regardless of phase.
 import { parseAbi, parseAbiItem } from "viem";
 import { config } from "../config.js";
+import { deleteApprovalsForToken } from "../core/db.js";
 import { publicClient } from "../core/rpc.js";
-import { _listAll, add, STATUS } from "../core/tokenRegistry.js";
+import { _listAll, add, markExpired, STATUS } from "../core/tokenRegistry.js";
 import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { logger } from "../util/logger.js";
 import { logWatcherError } from "../util/watcherErrors.js";
@@ -201,9 +202,14 @@ export const handleAirlockCreate = async ({ asset, numeraire, initializer, poolO
       fireSniper(poolMetadata, "poll-success");
     },
     onTimeout: (attempts) => {
+      // Quoter never accepted within the window → structurally blocked. Mark EXPIRED so the
+      // registry doesn't keep a stale ACTIVE row until the sweeper's TTL eviction (up to 48h).
+      // Drop any cached approvals too (defensive — we never traded, so usually none exist).
+      markExpired({ address: asset, reason: `doppler-poll-timeout (${attempts} attempts, ${DOPPLER_POLL_MAX_MS}ms)` });
+      deleteApprovalsForToken(asset);
       logger.warn(
         { asset, symbol: meta.symbol, attempts, windowMs: DOPPLER_POLL_MAX_MS },
-        "doppler: Quoter never accepted after polling — sniper skipped"
+        "doppler: Quoter never accepted after polling — sniper skipped, token marked expired"
       );
     },
     options: {

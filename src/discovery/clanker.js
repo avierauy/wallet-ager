@@ -3,8 +3,9 @@
 // address). Trades settle via standard Uniswap Universal Router so the adapter is "uniswap".
 import { parseAbiItem } from "viem";
 import { config } from "../config.js";
+import { deleteApprovalsForToken } from "../core/db.js";
 import { publicClient } from "../core/rpc.js";
-import { add, STATUS } from "../core/tokenRegistry.js";
+import { add, markExpired, STATUS } from "../core/tokenRegistry.js";
 import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { logger } from "../util/logger.js";
 import { logWatcherError } from "../util/watcherErrors.js";
@@ -18,6 +19,11 @@ const TokenCreated = parseAbiItem(
 const NATIVE_ZERO = "0x0000000000000000000000000000000000000000";
 const FACTORY = () => config.chain.dexes.clanker.factory;
 const WETH = () => config.chain.wnative.toLowerCase();
+
+// Clanker MEV hooks typically clear within 10-30s. v4Poller defaults give ~66s of polling,
+// which is fine for production. Tests need a tight ceiling to exercise onTimeout quickly.
+const CLANKER_POLL_INTERVAL_MS = Number(process.env.CLANKER_POLL_INTERVAL_MS ?? 5000);
+const CLANKER_POLL_MAX_ATTEMPTS = Number(process.env.CLANKER_POLL_MAX_ATTEMPTS ?? 12);
 
 const isWethOrNative = (addr) => {
   if (!addr) return false;
@@ -114,11 +120,16 @@ export const handleTokenCreated = async ({ tokenAddress, tokenSymbol, pairedToke
         .catch((err) => logger.error({ err: err.message }, "sniper invocation threw"));
     },
     onTimeout: (attempts) => {
+      // Quoter never accepted across the MEV window → mark EXPIRED so the row doesn't sit
+      // ACTIVE until the sweeper TTL eviction. Drop any cached approvals defensively.
+      markExpired({ address: tokenAddress, reason: `clanker-poll-timeout (${attempts} attempts)` });
+      deleteApprovalsForToken(tokenAddress);
       logger.warn(
         { token: tokenAddress, symbol: tokenSymbol, attempts },
-        "clanker: Quoter never accepted after MEV window — sniper skipped"
+        "clanker: Quoter never accepted after MEV window — sniper skipped, token marked expired"
       );
     },
+    options: { intervalMs: CLANKER_POLL_INTERVAL_MS, maxAttempts: CLANKER_POLL_MAX_ATTEMPTS },
   });
 
   return { added: true, status };
