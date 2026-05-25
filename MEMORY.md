@@ -196,3 +196,62 @@ Detalle granular en [[decisions/2026-05-25-discovery-db-cleanup]]:
 
 ### Pickup point
 Session terminada. Commits `c6e42a3` y `6e397df` en `main`, pusheados a origin. 11 tags v13.x previos + 2 nuevos en este push (sin nuevos tags, los commits son v13.11 y v13.12 en mensaje pero sin tag — el versionado en mensaje commit es suficiente, el repo no tiene política de tag-per-version estricta). Daemon parado, DB wipeada (no existe `data/wallet-ager.db` — solo backups del 2026-05-25 PM). Próximo paso: pedir confirmación per-msg para `npm start` y validar pending #1 en vivo.
+
+---
+
+## Session 2026-05-25 night — v13.13 sniper fanout + analysis sesión
+
+### Worked on
+Tres bloques de conversación encadenados:
+1. Análisis de `MAX_CONCURRENCY` (qué controla, cuándo importa, dimensionamiento para 200 wallets aging vs sniper).
+2. Diseño + entrega de **sniper fanout** (N wallets snipean el mismo launch con stagger random per-source).
+3. Auditoría de approvals + identificación de divergencia de fingerprint con UI real de Clanker (deuda registrada, no resuelta).
+
+### Completed
+
+**v13.13 — sniper fanout** (commit `89cb634`)
+- 8 env vars nuevas (4 sources × {fanout, stagger}): `SNIPER_FANOUT_{CLANKER,DOPPLER,VIRTUALS,UNISWAP}` y `SNIPER_FANOUT_<SRC>_STAGGER_MS` con defaults `1` y `0-0` respectivamente. Backwards compat completo.
+- Refactor `tryFireSniperBuy` → split en orchestrator (pick + reserve + schedule) + `fireOneSniperBuy` (per-wallet, lógica original sin reservation).
+- **Race protection**: slots + cooldown reservados para las N wallets en PICK time, no en fire time. Tests confirman que dos discoveries concurrentes con 4 wallets totales y fanout=3 cada una NO pickean wallets repetidas.
+- Stagger random ms en rango `[min, max]` aplicado per-source. Si min=max=0, fire inmediato (pero aún async via fireOneSniperBuy).
+- `_stopAll` cancela `pendingFanoutFires` además de `pendingSells` — fix descubierto cuando los timers leak entre tests.
+- Telegram: per-wallet notifyTrade preserved (decisión usuario: notif individuales, no batching).
+- Tests: 254/254 passing (247 baseline + 7 nuevos en `sniper-fanout.test.js`).
+
+**Análisis MAX_CONCURRENCY**
+- Para 200 wallets aging mode con profile actual: 10 está sobrado (factor 90× sobre demanda promedio). RPC quota es el bottleneck real antes que el semáforo.
+- Sniper mode no usa MAX_CONCURRENCY (los fires vienen direct de discovery handlers, sin pasar por tickSem). El cap real es discovery rate × fanout × cooldown per wallet.
+
+**Auditoría approvals + fingerprint divergence**
+- Mapeo confirmado: Path A (AlphaRouter sell) usa Permit2 inline signature (match con UI). Path B (V4 directSwap) usa 2 on-chain approves (ERC20→Permit2 + Permit2→UR). Buy en cualquier path = 0 approves (match).
+- **Divergencia identificada**: Clanker tokens van por Path B → primer sell emite 3 tx (vs 2 tx de un user real con Uniswap UI). El nonce de Permit2 nunca avanza para nuestras wallets en Clanker tokens → identificable on-chain con cluster analysis.
+- Razón histórica documentada en `directSwap.js:16-22`: el intento de inline-permit en V4 directSwap rompió en UR V2_1_1. Decisión consciente trade fingerprint por robustez.
+- **Decidido**: dejar approvals como están (Opción 1). La divergencia queda como deuda técnica explícita.
+
+### Decisiones clave
+Detalle en [[decisions/2026-05-25-sniper-fanout]]:
+- Aproximación 2 (stagger random) elegida sobre Aproximación 1 (simultáneo) y 3 (cola desacoplada).
+- Configuración per-source (vs flat global). Knobs separados Clanker/Doppler/Virtuals/Uniswap.
+- Stagger formato `"min-max"` string parseado en config.
+- Slot reservation en PICK time crítico para race protection.
+
+### Rechazado
+- Telegram batching de fanout notifs — usuario quiere mantener notif individual per-wallet.
+- Aproximación 3 (cola desacoplada) — pierde el sentido literal de "N wallets snipean el mismo token".
+- Tocar approvals ahora — pendiente verificar primero un swap real de Clanker en BaseScan antes de decidir si vale la pena reintentar inline-permit en V4.
+
+### En progreso / pendiente para próxima sesión
+1. **Validar v13.13 en vivo** con fanout > 1 en algún source. Config sugerido para primera prueba: `SNIPER_FANOUT_CLANKER=3 SNIPER_FANOUT_CLANKER_STAGGER_MS=2000-30000`. Observar:
+   - 3 sniper fires per Clanker discovery, distribuidos en ventana de 30s
+   - 3 notif individuales en Telegram (mismo token, distinto walletId, distinto timestamp)
+   - Cap diario consumido más rápido (verificar no exceder)
+2. **Verificar fingerprint real de Clanker UI** (próximo paso comprometido):
+   - Tomar wallet random que tradeó un Clanker reciente en BaseScan
+   - Decodificar primer sell: contar tx (approve count) + calldata commands del UR.execute
+   - Confirmar si tiene PERMIT2_PERMIT command o no
+   - Si match con assumption → confirma divergencia, decidir si vale el work de reintentar inline-permit
+   - Si NO match (e.g. Clanker UI usa otro router/agregador) → re-evaluar todo el path
+3. **Pendings persistentes**: sweeper TTL ≥6h, EOD cleanup 23:30 UTC, validación v13.11+v13.12 en vivo.
+
+### Pickup point
+Session terminada (continuación de la session evening). Commits `c6e42a3`, `6e397df`, `851fcf1` (docs) y `89cb634` (v13.13) en `main`. Todo pusheado a origin. Daemon parado, DB wipeada (`data/wallet-ager.db` no existe — solo backups del 2026-05-25 PM). SilverBullet+ actualizado (`decisions/2026-05-25-sniper-fanout.md` nuevo, `projects/wallet-ager.md` bumped a v13.13, `index.md` con link nuevo). Próximo paso: pedir confirmación per-msg para `npm start` (con fanout config decidido) y arrancar verificación del swap real de Clanker en BaseScan en paralelo.
