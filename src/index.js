@@ -12,17 +12,20 @@ import { startSweeper, stopSweeper } from "./discovery/sweeper.js";
 import { startUniswapDiscovery, stopUniswapDiscovery } from "./discovery/uniswap.js";
 import { startVirtualsDiscovery, stopVirtualsDiscovery } from "./discovery/virtuals.js";
 import { notifyInfo, startBatchTimer } from "./notify/telegram.js";
+import { startTelegramBot, stopTelegramBot } from "./notify/telegramBot.js";
 import { startDailyCleanup, stopDailyCleanup } from "./orchestrator/dailyCleanup.js";
 import { startWalletLoop } from "./orchestrator.js";
-import { initSniper, _stopAll as stopSniper } from "./orchestrator/sniper.js";
+import { initSniper, _state as sniperState, _stopAll as stopSniper } from "./orchestrator/sniper.js";
 import { logger } from "./util/logger.js";
 import { snapshot } from "./util/metrics.js";
+import { markStarted } from "./util/runtimeState.js";
 import { createSemaphore } from "./util/semaphore.js";
 
 const METRICS_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const STARTUP_SNAPSHOT_CONCURRENCY = 20;
 
 async function main() {
+  markStarted(); // record uptime baseline for the Telegram /status command
   const wallets = loadWallets();
   const tokens = getActiveTokens(); // snapshot for startup snapshotting/logging; orchestrator re-reads per tick
   logger.info(
@@ -74,6 +77,7 @@ async function main() {
 
   setInterval(() => logger.info(snapshot(), "metrics snapshot"), METRICS_LOG_INTERVAL_MS);
   startBatchTimer();
+  startTelegramBot({ wallets, sniperState });
   startVirtualsDiscovery();
   startUniswapDiscovery();
   startBankrDiscovery();
@@ -83,6 +87,7 @@ async function main() {
 
   const shutdown = async (sig) => {
     logger.info({ sig }, "shutdown signal — exiting");
+    stopTelegramBot();
     stopVirtualsDiscovery();
     stopUniswapDiscovery();
     stopBankrDiscovery();

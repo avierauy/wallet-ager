@@ -13,6 +13,7 @@ import { executeAction as defaultExecuteAction } from "../core/executor.js";
 import { publicClient as defaultPublicClient } from "../core/rpc.js";
 import { notifyError } from "../notify/telegram.js";
 import { getDailyState, recordTrade } from "../strategy/dailyCounter.js";
+import { isPaused } from "../util/runtimeState.js";
 
 // Dependency injection — lets tests substitute executeAction + publicClient without touching
 // ESM module bindings. Production code uses the defaults.
@@ -96,6 +97,12 @@ const pickWallet = (rng) => {
 export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
   if (walletsRef.length === 0) {
     return { skipped: "not-initialized" };
+  }
+  // Operator pause via /pause Telegram command. Sells in flight continue; we only block
+  // new buys. The flag lives in memory and resets on restart.
+  if (isPaused()) {
+    inc("sniper", { outcome: "paused" });
+    return { skipped: "paused" };
   }
   const wallet = pickWallet(rng);
   if (!wallet) {

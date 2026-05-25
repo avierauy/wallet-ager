@@ -269,6 +269,35 @@ export const upsertDailyAllowance = ({ wallet_id, date, allowance, sampled_at = 
     )
     .run(wallet_id, date, allowance, sampled_at);
 
+// Most recent N trades across all wallets. Used by the Telegram /recent command.
+export const listRecentTrades = (limit = 5) =>
+  db
+    .prepare(
+      `SELECT id, wallet_id, dex, side, token_in, token_out, amount_in, amount_out_min,
+              tx_hash, status, error, created_at
+       FROM trades
+       ORDER BY created_at DESC
+       LIMIT ?`
+    )
+    .all(limit);
+
+// Count trades today by side+status for a single wallet, used by /status / /wallets
+// commands. Returns an object like { buy_submitted: 3, sell_failed: 1 }.
+export const countTradesTodayByWallet = ({ wallet_id }) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = db
+    .prepare(
+      `SELECT side, status, COUNT(*) AS n FROM trades
+       WHERE wallet_id = ?
+         AND strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') = ?
+       GROUP BY side, status`
+    )
+    .all(wallet_id, today);
+  const out = {};
+  for (const r of rows) out[`${r.side}_${r.status}`] = r.n;
+  return out;
+};
+
 // Count buys that were actually broadcast (status='submitted') by this wallet on the
 // given UTC date. Aging-mode + sniper buys all flow through insertTrade so this captures
 // both. Dry-run trades are also marked 'submitted' from the executor's perspective and
