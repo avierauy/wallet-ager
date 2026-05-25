@@ -119,3 +119,50 @@ describe("buildBatchMessage", () => {
     assert.match(text, /errors:\s+0/);
   });
 });
+
+describe("via: line — token source on trade/error messages", () => {
+  beforeEach(() => { stubFetch(); tg._resetEventCounts(); });
+  afterEach(restoreFetch);
+
+  const getBodyText = () => {
+    const body = JSON.parse(fetchCalls[0].body);
+    return body.text;
+  };
+
+  test("notifyTrade adds via: line when source matches launchpad prefix", async () => {
+    setFlags({ trades: true });
+    for (const source of ["clanker-v4", "doppler-bankr", "virtuals-Launched"]) {
+      fetchCalls = [];
+      await tg.notifyTrade({ ...aTrade, source });
+      const text = getBodyText();
+      assert.match(text, /\*BUY\* on \*uniswap\*/);
+      assert.ok(text.includes(`via: \`${source.replace(/-/g, "\\-")}\``),
+        `expected via line for source=${source}, got:\n${text}`);
+    }
+  });
+
+  test("notifyTrade omits via: line for non-launchpad sources", async () => {
+    setFlags({ trades: true });
+    for (const source of [undefined, null, "", "uniswap-v4-fee8388608", "manual"]) {
+      fetchCalls = [];
+      await tg.notifyTrade({ ...aTrade, source });
+      const text = getBodyText();
+      assert.ok(!/\nvia:/.test(text), `unexpected via line for source=${source}: ${text}`);
+    }
+  });
+
+  test("notifyError adds via: line when source matches launchpad prefix", async () => {
+    setFlags({ errors: true });
+    await tg.notifyError({ ...anError, source: "clanker-v4" });
+    const text = getBodyText();
+    assert.match(text, /\*ERROR\* on \*uniswap\*/);
+    assert.ok(text.includes("via: `clanker\\-v4`"), `missing via line: ${text}`);
+  });
+
+  test("notifyError omits via: line when source missing", async () => {
+    setFlags({ errors: true });
+    await tg.notifyError({ ...anError });
+    const text = getBodyText();
+    assert.ok(!/\nvia:/.test(text), `unexpected via line: ${text}`);
+  });
+});

@@ -106,11 +106,19 @@ const renderHashLine = ({ txHash, explorer }) => {
   return [`hash: \`${escapeMd(txHash)}\``, linkLine].filter(Boolean).join("\n");
 };
 
+// Token "source" comes from discovery (e.g. "clanker-v4", "doppler-bankr", "virtuals-Launched").
+// When a token from a trusted launchpad swaps via Uniswap (most Clanker/Doppler tokens live
+// in V4 pools), the dex field alone hides the actual origin — surface it as a "via:" line.
+const LAUNCHPAD_SOURCE_RE = /^(clanker-|doppler-|virtuals-)/i;
+const renderViaLine = (source) =>
+  source && LAUNCHPAD_SOURCE_RE.test(source) ? `via: \`${escapeMd(source)}\`` : null;
+
 export const notifyTrade = ({
   walletId,
   walletAddress,
   dex,
   side,
+  source,
   txHash,
   explorer,
   in: inLeg,
@@ -119,27 +127,26 @@ export const notifyTrade = ({
   recordEvent("trades");
   if (!config.telegram.enabled || !config.telegram.notify.trades) return;
 
-  const lines = [
-    `*${escapeMd(side.toUpperCase())}* on *${escapeMd(dex)}*`,
-    renderWalletLine({ walletAddress, walletId, explorer }),
-    `spent: ${escapeMd(formatLeg(inLeg) ?? "?")}`,
-  ];
+  const lines = [`*${escapeMd(side.toUpperCase())}* on *${escapeMd(dex)}*`];
+  const viaLine = renderViaLine(source);
+  if (viaLine) lines.push(viaLine);
+  lines.push(renderWalletLine({ walletAddress, walletId, explorer }));
+  lines.push(`spent: ${escapeMd(formatLeg(inLeg) ?? "?")}`);
   if (outLeg) lines.push(`got:   ${escapeMd("~" + formatLeg(outLeg))}`);
   const hashBlock = renderHashLine({ txHash, explorer });
   if (hashBlock) lines.push(hashBlock);
   return send(lines.join("\n"));
 };
 
-export const notifyError = ({ walletId, walletAddress, dex, error, explorer }) => {
+export const notifyError = ({ walletId, walletAddress, dex, source, error, explorer }) => {
   recordEvent("errors");
   if (!config.telegram.enabled || !config.telegram.notify.errors) return;
-  return send(
-    [
-      `*ERROR* on *${escapeMd(dex)}*`,
-      renderWalletLine({ walletAddress, walletId, explorer }),
-      `msg:    ${escapeMd(error)}`,
-    ].join("\n")
-  );
+  const lines = [`*ERROR* on *${escapeMd(dex)}*`];
+  const viaLine = renderViaLine(source);
+  if (viaLine) lines.push(viaLine);
+  lines.push(renderWalletLine({ walletAddress, walletId, explorer }));
+  lines.push(`msg:    ${escapeMd(error)}`);
+  return send(lines.join("\n"));
 };
 
 export const notifyApproval = ({

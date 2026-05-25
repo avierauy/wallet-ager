@@ -272,6 +272,7 @@ export const scheduleSell = ({ wallet, token, delayMs, sniper, attempt = 1 }) =>
           walletId: wallet.id,
           walletAddress: wallet.account.address,
           dex: plan.dex,
+          source: token.source,
           error: `sell ${token.symbol} exhausted ${attempt} attempts — leaving position`,
           explorer: config.chain.blockExplorer,
         });
@@ -290,6 +291,7 @@ export const scheduleSell = ({ wallet, token, delayMs, sniper, attempt = 1 }) =>
           walletId: wallet.id,
           walletAddress: wallet.account.address,
           dex: token.tradeableOn?.[0] ?? "uniswap",
+          source: token.source,
           error: `sell ${token.symbol} exhausted ${attempt} attempts (last error: ${err.message})`,
           explorer: config.chain.blockExplorer,
         });

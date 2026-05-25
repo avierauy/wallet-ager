@@ -246,6 +246,7 @@ export const executeAction = async ({ wallet, plan }) => {
       walletAddress: wallet.account.address,
       dex: plan.dex,
       side: plan.side,
+      source: plan.token.source,
       txHash: dispatched.txHash,
       explorer: config.chain.blockExplorer,
       in: dispatched.in,
@@ -295,6 +296,7 @@ export const executeAction = async ({ wallet, plan }) => {
         walletId: wallet.id,
         walletAddress: wallet.account.address,
         dex: plan.dex,
+        source: plan.token.source,
         error: err.message,
         explorer: config.chain.blockExplorer,
       });
