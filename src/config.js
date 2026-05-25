@@ -15,6 +15,26 @@ const parseBool = (val, fallback) => {
   return val === "true" || val === "1" || val === "yes";
 };
 
+// Stagger range format: "min-max" in ms, both non-negative integers, max >= min. "0-0" means
+// no stagger (fires immediately). Throws on invalid input — config errors should be loud.
+const parseStaggerRange = (raw, name) => {
+  const parts = String(raw).split("-").map((s) => Number(s.trim()));
+  if (parts.length !== 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) {
+    throw new Error(`${name}: invalid stagger range "${raw}" — expected "min-max" (e.g. "2000-30000")`);
+  }
+  const [min, max] = parts;
+  if (min < 0 || max < 0 || max < min) {
+    throw new Error(`${name}: invalid stagger range "${raw}" — both ≥0 and max ≥ min`);
+  }
+  return [min, max];
+};
+
+const positiveInt = (raw, name) => {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${name}: must be a positive integer, got "${raw}"`);
+  return n;
+};
+
 const readJson = (path) => JSON.parse(readFileSync(resolve(path), "utf8"));
 
 const chain = required("CHAIN");
@@ -69,5 +89,24 @@ export const config = {
     // "simulation" (default) — on-chain buy + roundtrip via AlphaRouter (covers V2/V3/V4).
     // "honeypot"             — external honeypot.is API (legacy; coverage gaps on V4).
     provider: optional("SAFETY_PROVIDER", "simulation"),
+  },
+  // Sniper fanout — when a fresh launch is discovered, N random eligible wallets snipe it,
+  // each fired after a random delay in [staggerMin, staggerMax] ms. Defaults preserve the
+  // pre-v13.13 behavior (1 wallet, immediate). Configurable per-source so Clanker vs Doppler
+  // vs Virtuals can be tuned independently (different MEV windows, different risk profiles).
+  // `uniswap` covers generic Uniswap discoveries (non-launchpad) and static tokens.
+  sniper: {
+    fanoutBySource: {
+      clanker:  positiveInt(optional("SNIPER_FANOUT_CLANKER",  "1"), "SNIPER_FANOUT_CLANKER"),
+      doppler:  positiveInt(optional("SNIPER_FANOUT_DOPPLER",  "1"), "SNIPER_FANOUT_DOPPLER"),
+      virtuals: positiveInt(optional("SNIPER_FANOUT_VIRTUALS", "1"), "SNIPER_FANOUT_VIRTUALS"),
+      uniswap:  positiveInt(optional("SNIPER_FANOUT_UNISWAP",  "1"), "SNIPER_FANOUT_UNISWAP"),
+    },
+    staggerMsBySource: {
+      clanker:  parseStaggerRange(optional("SNIPER_FANOUT_CLANKER_STAGGER_MS",  "0-0"), "SNIPER_FANOUT_CLANKER_STAGGER_MS"),
+      doppler:  parseStaggerRange(optional("SNIPER_FANOUT_DOPPLER_STAGGER_MS",  "0-0"), "SNIPER_FANOUT_DOPPLER_STAGGER_MS"),
+      virtuals: parseStaggerRange(optional("SNIPER_FANOUT_VIRTUALS_STAGGER_MS", "0-0"), "SNIPER_FANOUT_VIRTUALS_STAGGER_MS"),
+      uniswap:  parseStaggerRange(optional("SNIPER_FANOUT_UNISWAP_STAGGER_MS",  "0-0"), "SNIPER_FANOUT_UNISWAP_STAGGER_MS"),
+    },
   },
 };

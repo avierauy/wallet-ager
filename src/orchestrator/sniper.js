@@ -46,6 +46,10 @@ const DEFAULT_SNIPER = {
 let walletsRef = [];
 const sniperState = new Map();  // walletId → { lastSnipeAt }
 const pendingSells = new Map(); // "walletId:tokenAddr" → timeout handle
+// Fanout setTimeout handles for staggered fires that haven't run yet. Tracked so _stopAll
+// can cancel pending fires on shutdown / test teardown — otherwise late-arriving fires would
+// land in pendingSells after the cleanup ran.
+const pendingFanoutFires = new Set();
 
 // In-memory slot reservations to close the race between picking a wallet and the
 // executor's insertTrade row landing in the DB. Without this, a burst of fresh-token
@@ -92,31 +96,46 @@ const pickWallet = (rng) => {
   return eligible[Math.floor(rng() * eligible.length)];
 };
 
-// Public entry — fire-and-forget from the discovery handlers. Returns a result object so
-// tests can assert on it; callers should NOT await unless they care about the outcome.
-export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
-  if (walletsRef.length === 0) {
-    return { skipped: "not-initialized" };
+// Multi-wallet pick for fanout. Single-wallet path delegates to pickWallet to preserve the
+// exact rng-consumption pattern existing tests depend on (one rng() call → one wallet index).
+// Multi-wallet uses Fisher-Yates so the chosen subset is uniformly random without replacement.
+const pickWalletsRandom = (rng, n) => {
+  if (n <= 1) {
+    const w = pickWallet(rng);
+    return w ? [w] : [];
   }
-  // Operator pause via /pause Telegram command. Sells in flight continue; we only block
-  // new buys. The flag lives in memory and resets on restart.
-  if (isPaused()) {
-    inc("sniper", { outcome: "paused" });
-    return { skipped: "paused" };
+  const now = Date.now();
+  const eligible = walletsRef.filter((w) => isEligible(w, now));
+  if (eligible.length === 0) return [];
+  const shuffled = [...eligible];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
   }
-  const wallet = pickWallet(rng);
-  if (!wallet) {
-    inc("sniper", { outcome: "no-eligible-wallet" });
-    return { skipped: "no-eligible-wallet" };
-  }
+  return shuffled.slice(0, Math.min(n, shuffled.length));
+};
 
-  // Reserve immediately so two near-simultaneous fresh tokens don't both pick the same wallet.
-  sniperState.set(wallet.id, { lastSnipeAt: Date.now() });
-  // Reserve a daily-cap slot for this in-flight buy. Released in the finally below regardless
-  // of outcome — once executeAction returns, the trade row (if submitted) is in the DB and
-  // future canTrade reads will see it via the live count.
-  reservedSlots.set(wallet.id, (reservedSlots.get(wallet.id) ?? 0) + 1);
+// Map a token's `source` (e.g. "clanker-v4", "doppler-bankr", "virtuals-Launched", "uniswap-v3")
+// to the matching fanout config key. Unknown / missing sources fall through to "uniswap".
+const sourceToFanoutKey = (source) => {
+  if (!source) return "uniswap";
+  if (/^clanker-/.test(source)) return "clanker";
+  if (/^doppler-/.test(source)) return "doppler";
+  if (/^virtuals-/.test(source)) return "virtuals";
+  return "uniswap";
+};
 
+const computeStaggerDelay = ([minMs, maxMs], rng) => {
+  if (minMs === 0 && maxMs === 0) return 0;
+  if (minMs === maxMs) return minMs;
+  return Math.floor(minMs + (maxMs - minMs) * rng());
+};
+
+// Per-wallet fire logic — extracted from the original tryFireSniperBuy. Caller is responsible
+// for having already reserved the slot + cooldown for this wallet (see tryFireSniperBuy).
+// Returns { fired, walletId, result } on success, { error } on throw. Releases the reservation
+// in finally regardless of outcome.
+const fireOneSniperBuy = async ({ wallet, token, rng }) => {
   const sniper = profileSniper(wallet);
   const ethRange = sniper.amountRangeNativeEth ?? wallet.profile.amountRangeNativeEth;
   const amountEth = sampleUniform(ethRange, rng);
@@ -145,9 +164,6 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
     if (result.status === "submitted" || result.status === "dry-run") {
       recordTrade({ wallet });
       const remaining = getDailyState({ wallet })?.remaining;
-      // Slot bookkeeping is debug-level since the consolidated "trade completed" line in
-      // the executor already carries walletId and the operator can query remaining via
-      // the Telegram /status command.
       logger.debug(
         { walletId: wallet.id, token: token.symbol, remainingTradesToday: remaining },
         "sniper: round-trip slot consumed"
@@ -177,6 +193,79 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
     if (next <= 0) reservedSlots.delete(wallet.id);
     else reservedSlots.set(wallet.id, next);
   }
+};
+
+// Public entry — fire-and-forget from the discovery handlers. Reads fanout + stagger from
+// config based on the token's source; picks N random eligible wallets; reserves slot+cooldown
+// for all N immediately at pick time (so a concurrent discovery cannot re-pick them); then
+// fires each one with a random stagger delay.
+//
+// Backwards-compat path: when fanout=1 AND stagger is [0,0] (the defaults), fires the single
+// wallet synchronously and returns { fired, walletId, result } exactly like pre-v13.13.
+// Multi-wallet OR stagger>0 returns { fanout, scheduled: [{ walletId, delayMs }] } and the
+// individual fires run in background via setTimeout. Callers don't await individual fires.
+export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
+  if (walletsRef.length === 0) {
+    return { skipped: "not-initialized" };
+  }
+  // Operator pause via /pause Telegram command. Sells in flight continue; we only block
+  // new buys. The flag lives in memory and resets on restart.
+  if (isPaused()) {
+    inc("sniper", { outcome: "paused" });
+    return { skipped: "paused" };
+  }
+
+  const fanoutKey = sourceToFanoutKey(token.source);
+  const fanoutN = config.sniper.fanoutBySource[fanoutKey];
+  const staggerRange = config.sniper.staggerMsBySource[fanoutKey];
+
+  const wallets = pickWalletsRandom(rng, fanoutN);
+  if (wallets.length === 0) {
+    inc("sniper", { outcome: "no-eligible-wallet" });
+    return { skipped: "no-eligible-wallet" };
+  }
+
+  // Reserve slot + cooldown for ALL picked wallets immediately. This is the race protection:
+  // a concurrent tryFireSniperBuy for a different token must see these wallets as already
+  // reserved (cap-wise) and in cooldown (sniperState-wise), so it picks others.
+  const now = Date.now();
+  for (const w of wallets) {
+    sniperState.set(w.id, { lastSnipeAt: now });
+    reservedSlots.set(w.id, (reservedSlots.get(w.id) ?? 0) + 1);
+  }
+
+  // Backwards-compat: single wallet + no stagger → fire synchronously, same return shape as before.
+  if (wallets.length === 1 && staggerRange[0] === 0 && staggerRange[1] === 0) {
+    return await fireOneSniperBuy({ wallet: wallets[0], token, rng });
+  }
+
+  // Fanout path: schedule each fire with random stagger delay; return descriptor synchronously.
+  const scheduled = wallets.map((w) => ({ walletId: w.id, delayMs: computeStaggerDelay(staggerRange, rng) }));
+  for (let i = 0; i < wallets.length; i++) {
+    const w = wallets[i];
+    const delayMs = scheduled[i].delayMs;
+    const run = () => {
+      fireOneSniperBuy({ wallet: w, token, rng })
+        .catch((err) => logger.error({ walletId: w.id, err: err.message }, "sniper: fanout fire threw"));
+    };
+    if (delayMs === 0) {
+      run();
+    } else {
+      let handle;
+      handle = setTimeout(() => {
+        pendingFanoutFires.delete(handle);
+        run();
+      }, delayMs);
+      pendingFanoutFires.add(handle);
+    }
+  }
+  inc("sniper", { outcome: "fanout-scheduled" });
+  logger.info(
+    { token: token.symbol, source: token.source, fanoutKey, fanoutN: wallets.length,
+      walletIds: wallets.map((w) => w.id), staggerRange },
+    "sniper: fanout scheduled"
+  );
+  return { fanout: wallets.length, scheduled };
 };
 
 // Each failed sell schedules itself again after RETRY_INTERVAL_MS, up to MAX_SELL_ATTEMPTS
@@ -310,6 +399,8 @@ export const _state = () => ({
 export const _stopAll = () => {
   for (const h of pendingSells.values()) clearTimeout(h);
   pendingSells.clear();
+  for (const h of pendingFanoutFires) clearTimeout(h);
+  pendingFanoutFires.clear();
   sniperState.clear();
   reservedSlots.clear();
   walletsRef = [];
