@@ -12,7 +12,7 @@ import { config } from "../config.js";
 import { executeAction as defaultExecuteAction } from "../core/executor.js";
 import { publicClient as defaultPublicClient } from "../core/rpc.js";
 import { notifyError } from "../notify/telegram.js";
-import { canTrade, getDailyState, recordTrade } from "../strategy/dailyCounter.js";
+import { getDailyState, recordTrade } from "../strategy/dailyCounter.js";
 
 // Dependency injection — lets tests substitute executeAction + publicClient without touching
 // ESM module bindings. Production code uses the defaults.
@@ -39,6 +39,18 @@ let walletsRef = [];
 const sniperState = new Map();  // walletId → { lastSnipeAt }
 const pendingSells = new Map(); // "walletId:tokenAddr" → timeout handle
 
+// In-memory slot reservations to close the race between picking a wallet and the
+// executor's insertTrade row landing in the DB. Without this, a burst of fresh-token
+// discoveries (Clanker pool launches arrive in clusters) would let several
+// tryFireSniperBuy calls each pass canTrade() before any of their trade rows hit
+// the trades table, allowing a wallet to exceed its daily cap by N-1 buys.
+//
+// Lifecycle: incremented in tryFireSniperBuy right after pickWallet, decremented
+// in the finally block once executeAction returns (any outcome). The reservation
+// only needs to cover the window between pickWallet and insertTrade — after the
+// trade row exists, getDailyState reads the authoritative count from DB.
+const reservedSlots = new Map(); // walletId → number of in-flight buy attempts
+
 export const initSniper = (wallets) => {
   walletsRef = wallets;
   const enabledCount = wallets.filter((w) => w.profile.sniper?.enabled).length;
@@ -55,8 +67,13 @@ const isEligible = (wallet, nowMs) => {
   const last = sniperState.get(wallet.id);
   if (last && nowMs - last.lastSnipeAt < sniper.cooldownMin * 60 * 1000) return false;
   // Daily round-trip cap applies to BOTH sniper and aging flows — a buy consumes one slot
-  // regardless of source. Sells (scheduled or retried) never consume slots.
-  if (!canTrade({ wallet })) return false;
+  // regardless of source. Sells (scheduled or retried) never consume slots. We include
+  // in-flight reservations so concurrent Clanker bursts cannot all pass this check before
+  // any of their trade rows reach the DB.
+  const state = getDailyState({ wallet });
+  if (!state) return false;
+  const reserved = reservedSlots.get(wallet.id) ?? 0;
+  if (state.used + reserved >= state.allowance) return false;
   return true;
 };
 
@@ -81,6 +98,10 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
 
   // Reserve immediately so two near-simultaneous fresh tokens don't both pick the same wallet.
   sniperState.set(wallet.id, { lastSnipeAt: Date.now() });
+  // Reserve a daily-cap slot for this in-flight buy. Released in the finally below regardless
+  // of outcome — once executeAction returns, the trade row (if submitted) is in the DB and
+  // future canTrade reads will see it via the live count.
+  reservedSlots.set(wallet.id, (reservedSlots.get(wallet.id) ?? 0) + 1);
 
   const sniper = profileSniper(wallet);
   const ethRange = sniper.amountRangeNativeEth ?? wallet.profile.amountRangeNativeEth;
@@ -131,6 +152,13 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
     logger.error({ walletId: wallet.id, err: err.message }, "sniper: buy threw");
     inc("sniper", { outcome: "buy-error" });
     return { error: err.message };
+  } finally {
+    // Release the in-flight reservation. Outcome doesn't matter: if the trade was
+    // submitted, the DB row is now visible to canTrade; if it was skipped/failed/threw,
+    // no slot was consumed in the first place.
+    const next = (reservedSlots.get(wallet.id) ?? 1) - 1;
+    if (next <= 0) reservedSlots.delete(wallet.id);
+    else reservedSlots.set(wallet.id, next);
   }
 };
 
@@ -253,5 +281,6 @@ export const _stopAll = () => {
   for (const h of pendingSells.values()) clearTimeout(h);
   pendingSells.clear();
   sniperState.clear();
+  reservedSlots.clear();
   walletsRef = [];
 };

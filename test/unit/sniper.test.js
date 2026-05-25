@@ -156,4 +156,40 @@ describe("sniper", () => {
     assert.equal(r2.result.status, "submitted");
     assert.equal(exec.calls.length, 2);
   });
+
+  test("concurrent bursts do NOT exceed the daily cap (in-flight slot reservation)", async () => {
+    // Fixed allowance of 2 via tradesPerDay: [2, 2]. Three concurrent fires must result in
+    // exactly 2 submits; the third must be rejected with no-eligible-wallet because the
+    // reservation counts the two in-flight buys before either trade row hits the DB.
+    initSniper([
+      makeWallet("w1", {
+        tradesPerDay: [2, 2],
+        sniper: { enabled: true, cooldownMin: 0, sellDelayMin: [10, 20] },
+      }),
+    ]);
+    // Slow executor to keep the first two reservations in-flight while the third is picked.
+    let inflight = 0;
+    let maxInflight = 0;
+    const exec = {
+      fn: async () => {
+        inflight++;
+        maxInflight = Math.max(maxInflight, inflight);
+        await new Promise((r) => setTimeout(r, 30));
+        inflight--;
+        return { status: "submitted" };
+      },
+      calls: [],
+    };
+    _setDeps({ executeAction: exec.fn });
+    const results = await Promise.all([
+      tryFireSniperBuy({ token: TOKEN }),
+      tryFireSniperBuy({ token: { ...TOKEN, address: "0x" + "b".repeat(40) } }),
+      tryFireSniperBuy({ token: { ...TOKEN, address: "0x" + "c".repeat(40) } }),
+    ]);
+    const fired = results.filter((r) => r.fired === true);
+    const rejected = results.filter((r) => r.skipped === "no-eligible-wallet");
+    assert.equal(fired.length, 2, "exactly 2 should fire");
+    assert.equal(rejected.length, 1, "exactly 1 should be rejected by cap");
+    assert.ok(maxInflight >= 2, "test should actually exercise concurrency");
+  });
 });
