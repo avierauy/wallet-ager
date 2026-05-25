@@ -115,9 +115,18 @@ export const sweepOnce = async ({ now = Date.now(), ttlHours = config.discovery.
     }
   }
 
+  // Surface the full DB picture, not just what we walked. Helps verify the TTL is
+  // actually pruning growth — without this it's hard to tell whether the registry
+  // is bounded or growing unbounded.
+  const statusCounts = {};
+  for (const s of statusByAddr.values()) statusCounts[s] = (statusCounts[s] ?? 0) + 1;
+  const dbTotal = statusByAddr.size;
+
   const summary = {
     total: tokens.length,
     expired, rechecked, markedUnsafe, markedActive, stillPending, skipped,
+    dbTotal,
+    dbByStatus: statusCounts,
   };
   logger.info(summary, "discovery sweep complete");
   return summary;
