@@ -115,7 +115,7 @@ export const buyExactEthForToken = async ({ account, tokenOut, amountInWei, slip
         amountInWei,
         slippageBps,
       });
-      logger.info(
+      logger.debug(
         { token: tokenOut.symbol, path: r.path, minOut: r.minOut.toString(), txHash: r.txHash },
         "uniswap: direct swap submitted"
       );
@@ -153,7 +153,7 @@ export const sellExactTokenForEth = async ({ account, tokenIn, amountInWei, slip
         amountInWei,
         slippageBps,
       });
-      logger.info(
+      logger.debug(
         { token: tokenIn.symbol, path: r.path, minOut: r.minOut.toString(),
           expectedOut: r.expectedOut.toString(), txHash: r.txHash,
           approvals: r.approvals.length },

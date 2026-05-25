@@ -251,10 +251,26 @@ export const executeAction = async ({ wallet, plan }) => {
       in: dispatched.in,
       out: dispatched.out,
     });
+    // Consolidated trade record — single INFO line per completed trade carrying every
+    // field the operator needs. Granular adapter / sniper logs around this point are at
+    // DEBUG so production INFO traffic stays one-line-per-trade. Set LOG_LEVEL=debug to
+    // see the per-step breakdown when investigating a specific trade.
     logger.info(
-      { walletId: wallet.id, walletAddress: wallet.account.address,
-        dex: plan.dex, side: plan.side, token: plan.token.symbol, txHash: dispatched.txHash },
-      "trade submitted"
+      {
+        event: "trade_completed",
+        walletId: wallet.id,
+        walletAddress: wallet.account.address,
+        dex: plan.dex,
+        side: plan.side,
+        token: plan.token.symbol,
+        tokenAddress: plan.token.address,
+        amountInWei: dispatched.in?.amountWei?.toString?.() ?? plan.amountInWei.toString(),
+        amountOutWei: dispatched.out?.amountWei?.toString?.() ?? null,
+        slippageBps: plan.slippageBps,
+        txHash: dispatched.txHash,
+        source: plan.token.source ?? null,
+      },
+      "trade completed"
     );
     return { status: "submitted", txHash: dispatched.txHash };
   } catch (err) {

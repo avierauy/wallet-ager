@@ -138,7 +138,10 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
     if (result.status === "submitted" || result.status === "dry-run") {
       recordTrade({ wallet });
       const remaining = getDailyState({ wallet })?.remaining;
-      logger.info(
+      // Slot bookkeeping is debug-level since the consolidated "trade completed" line in
+      // the executor already carries walletId and the operator can query remaining via
+      // the Telegram /status command.
+      logger.debug(
         { walletId: wallet.id, token: token.symbol, remainingTradesToday: remaining },
         "sniper: round-trip slot consumed"
       );
