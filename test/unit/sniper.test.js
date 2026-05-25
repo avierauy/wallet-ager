@@ -4,6 +4,7 @@ import {
   _resetDeps,
   _setDeps,
   _stopAll,
+  effectiveSellSlippageBps,
   initSniper,
   tryFireSniperBuy,
 } from "../../src/orchestrator/sniper.js";
@@ -155,6 +156,23 @@ describe("sniper", () => {
     assert.equal(r2.fired, true);
     assert.equal(r2.result.status, "submitted");
     assert.equal(exec.calls.length, 2);
+  });
+
+  test("effectiveSellSlippageBps bumps per attempt, capped at max", () => {
+    const sniper = { sellSlippageBps: 2500, sellSlippageBumpBpsPerAttempt: 500, sellSlippageBpsMax: 4000 };
+    assert.equal(effectiveSellSlippageBps(sniper, 1), 2500);
+    assert.equal(effectiveSellSlippageBps(sniper, 2), 3000);
+    assert.equal(effectiveSellSlippageBps(sniper, 3), 3500);
+    assert.equal(effectiveSellSlippageBps(sniper, 4), 4000); // hits cap
+    assert.equal(effectiveSellSlippageBps(sniper, 5), 4000); // stays at cap
+    // attempt < 1 (defensive) still returns base
+    assert.equal(effectiveSellSlippageBps(sniper, 0), 2500);
+  });
+
+  test("effectiveSellSlippageBps falls back to DEFAULT_SNIPER when fields missing", () => {
+    // empty sniper config — must not throw, must return the default base
+    assert.equal(effectiveSellSlippageBps({}, 1), 300);
+    assert.equal(effectiveSellSlippageBps({}, 2), 800); // 300 + 500
   });
 
   test("concurrent bursts do NOT exceed the daily cap (in-flight slot reservation)", async () => {

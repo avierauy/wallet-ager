@@ -33,6 +33,13 @@ const DEFAULT_SNIPER = {
   sellDelayMin: [10, 60],     // [low, high] minutes between buy and sell
   amountRangeNativeEth: null, // falls back to profile.amountRangeNativeEth
   sellSlippageBps: 300,       // wider than aging sells — fresh tokens move fast
+  // Per-retry slippage bump. Hook-blocked sells often clear within seconds, but on
+  // a volatile fresh launch the price has already moved. Each retry widens the
+  // tolerance so the next attempt has a better chance of landing.
+  // attempt 1 uses sellSlippageBps; attempt N uses sellSlippageBps + bump * (N-1),
+  // capped at sellSlippageBpsMax to prevent giving away too much on a stale token.
+  sellSlippageBumpBpsPerAttempt: 500,
+  sellSlippageBpsMax: 5000,
 };
 
 let walletsRef = [];
@@ -169,6 +176,15 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
 const RETRY_INTERVAL_MS = 30_000;
 const MAX_SELL_ATTEMPTS = 5;
 
+// Pure: compute the slippage tolerance for the Nth attempt. attempt is 1-indexed.
+// Exported for unit tests; production callers use it inside scheduleSell.
+export const effectiveSellSlippageBps = (sniper, attempt) => {
+  const baseBps = sniper.sellSlippageBps ?? DEFAULT_SNIPER.sellSlippageBps;
+  const bumpBps = sniper.sellSlippageBumpBpsPerAttempt ?? DEFAULT_SNIPER.sellSlippageBumpBpsPerAttempt;
+  const maxBps = sniper.sellSlippageBpsMax ?? DEFAULT_SNIPER.sellSlippageBpsMax;
+  return Math.min(maxBps, baseBps + bumpBps * Math.max(0, attempt - 1));
+};
+
 // Exported so the aging-mode orchestrator can reuse the same retry mechanism after one of
 // its own sells fails — see src/orchestrator.js. Both flows then share the 5×30s retry
 // surface and the silent-on-fail Telegram suppression until exhaustion.
@@ -201,12 +217,13 @@ export const scheduleSell = ({ wallet, token, delayMs, sniper, attempt = 1 }) =>
         inc("sniper", { outcome: "sell-no-balance" });
         return;
       }
+      const effectiveSlippageBps = effectiveSellSlippageBps(sniper, attempt);
       const plan = {
         dex: token.tradeableOn?.[0] ?? "uniswap",
         side: "sell",
         token,
         amountInWei: balance,
-        slippageBps: sniper.sellSlippageBps,
+        slippageBps: effectiveSlippageBps,
         gasMultiplier: 1.2,
         // Telegram-noise control: every retry attempt is silent on Telegram. We notify
         // ONCE at the bottom of this block if all retries are exhausted, with a meaningful
@@ -215,7 +232,8 @@ export const scheduleSell = ({ wallet, token, delayMs, sniper, attempt = 1 }) =>
       };
       logger.info(
         { walletId: wallet.id, walletAddress: wallet.account.address,
-          token: token.symbol, balance: balance.toString(), attempt },
+          token: token.symbol, balance: balance.toString(), attempt,
+          slippageBps: effectiveSlippageBps },
         "sniper: firing sell"
       );
       inc("sniper", { outcome: "sell-fire" });
