@@ -15,6 +15,7 @@ import { publicClient } from "../core/rpc.js";
 import { _listAll, add, STATUS } from "../core/tokenRegistry.js";
 import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { logger } from "../util/logger.js";
+import { logWatcherError } from "../util/watcherErrors.js";
 import { tokenHasExistingPools } from "./poolExistence.js";
 import { detectV3Pool, resolveV4PoolKeyViaQuoter } from "./v4PoolKey.js";
 import { startV4Poll } from "./v4Poller.js";
@@ -244,7 +245,7 @@ export const startBankrDiscovery = () => {
           }).catch((err) => logger.error({ err: err.message }, "doppler/airlock-create: handler threw"));
         }
       },
-      onError: (err) => logger.error({ err: err.message }, "doppler/airlock-create: watcher error"),
+      onError: (err) => logWatcherError(logger, err, "doppler/airlock-create: watcher error"),
     })
   );
 
@@ -258,7 +259,7 @@ export const startBankrDiscovery = () => {
             .catch((err) => logger.error({ err: err.message }, "doppler/airlock-migrate: handler threw"));
         }
       },
-      onError: (err) => logger.error({ err: err.message }, "doppler/airlock-migrate: watcher error"),
+      onError: (err) => logWatcherError(logger, err, "doppler/airlock-migrate: watcher error"),
     })
   );
 

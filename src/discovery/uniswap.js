@@ -20,6 +20,7 @@ import { _listAll, add, STATUS } from "../core/tokenRegistry.js";
 import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { checkToken } from "../safety/index.js";
 import { logger } from "../util/logger.js";
+import { logWatcherError } from "../util/watcherErrors.js";
 import { tokenHasExistingPools } from "./poolExistence.js";
 
 const PairCreated = parseAbiItem(
@@ -250,7 +251,7 @@ export const startUniswapDiscovery = () => {
           }).catch((err) => logger.error({ err: err.message }, "uniswap V2: handler threw"));
         }
       },
-      onError: (err) => logger.error({ err: err.message }, "uniswap V2: watcher error"),
+      onError: (err) => logWatcherError(logger, err, "uniswap V2: watcher error"),
     })
   );
 
@@ -268,7 +269,7 @@ export const startUniswapDiscovery = () => {
           }).catch((err) => logger.error({ err: err.message }, "uniswap V3: handler threw"));
         }
       },
-      onError: (err) => logger.error({ err: err.message }, "uniswap V3: watcher error"),
+      onError: (err) => logWatcherError(logger, err, "uniswap V3: watcher error"),
     })
   );
 
@@ -288,7 +289,7 @@ export const startUniswapDiscovery = () => {
           }).catch((err) => logger.error({ err: err.message }, "uniswap V4: handler threw"));
         }
       },
-      onError: (err) => logger.error({ err: err.message }, "uniswap V4: watcher error"),
+      onError: (err) => logWatcherError(logger, err, "uniswap V4: watcher error"),
     })
   );
 

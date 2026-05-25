@@ -11,15 +11,30 @@ import { publicClient } from "./rpc.js";
 const NATIVE_SENTINEL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const QUOTE_RECIPIENT = "0x000000000000000000000000000000000000dEaD";
 
+// In-memory negative cache for the price probe: meme tokens in tokens.json that
+// AlphaRouter cannot route get re-queried on every startup, generating ~35 warnings
+// of the same kind every restart. Cache the failure for 30min so the first restart
+// after a code change pays the cost, but quick restarts (debugging) don't.
+const NO_ROUTE_CACHE_TTL_MS = 30 * 60 * 1000;
+const noRouteCache = new Map(); // lowercase addr → expiresAt (epoch ms)
+export const _clearNoRouteCache = () => noRouteCache.clear(); // test helper
+
 // Quote `probeAmount` (1 whole token unit) of each token into ETH wei. Returns a Map
 // keyed by lowercase token address with `{ probeAmount, ethValue }` so callers can scale
 // linearly for any wallet balance.
 export const fetchTokenPrices = async (tokens) => {
   const prices = new Map();
+  const now = Date.now();
   for (const token of tokens) {
     const key = token.address.toLowerCase();
     if (key === NATIVE_SENTINEL.toLowerCase()) {
       prices.set(key, { probeAmount: 10n ** 18n, ethValue: 10n ** 18n });
+      continue;
+    }
+    // Skip the quote if we recently saw a no-route failure for this token.
+    const cachedUntil = noRouteCache.get(key);
+    if (cachedUntil && cachedUntil > now) {
+      prices.set(key, null);
       continue;
     }
     const probeAmount = 10n ** BigInt(token.decimals);
@@ -33,9 +48,11 @@ export const fetchTokenPrices = async (tokens) => {
       });
       const ethValue = BigInt(route.quote.quotient.toString());
       prices.set(key, { probeAmount, ethValue });
+      noRouteCache.delete(key); // success — drop any stale negative entry
     } catch (err) {
       logger.warn({ token: token.symbol, err: err.message }, "price quote failed; valuing at 0");
       prices.set(key, null);
+      noRouteCache.set(key, now + NO_ROUTE_CACHE_TTL_MS);
     }
   }
   return prices;

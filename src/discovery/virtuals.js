@@ -5,6 +5,7 @@ import { publicClient } from "../core/rpc.js";
 import { add, markExpired, STATUS } from "../core/tokenRegistry.js";
 import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { logger } from "../util/logger.js";
+import { logWatcherError } from "../util/watcherErrors.js";
 
 // Use the BaseScan-fetched ABI so the complex `launchParams` tuple is decoded automatically.
 const BONDING_ABI = JSON.parse(
@@ -90,7 +91,7 @@ export const startVirtualsDiscovery = () => {
           );
         }
       },
-      onError: (err) => logger.error({ err: err.message }, "virtuals: Launched watcher error"),
+      onError: (err) => logWatcherError(logger, err, "virtuals: Launched watcher error"),
     })
   );
 
@@ -105,7 +106,7 @@ export const startVirtualsDiscovery = () => {
           catch (err) { logger.error({ err: err.message, token: log.args.token }, "virtuals: handleGraduated threw"); }
         }
       },
-      onError: (err) => logger.error({ err: err.message }, "virtuals: Graduated watcher error"),
+      onError: (err) => logWatcherError(logger, err, "virtuals: Graduated watcher error"),
     })
   );
 

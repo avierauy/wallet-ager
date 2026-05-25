@@ -7,6 +7,7 @@ import { publicClient } from "../core/rpc.js";
 import { add, STATUS } from "../core/tokenRegistry.js";
 import { tryFireSniperBuy } from "../orchestrator/sniper.js";
 import { logger } from "../util/logger.js";
+import { logWatcherError } from "../util/watcherErrors.js";
 import { quoteV4Pool, resolveV4PoolKey } from "./v4PoolKey.js";
 import { startV4Poll } from "./v4Poller.js";
 
@@ -141,7 +142,7 @@ export const startClankerDiscovery = () => {
         }).catch((err) => logger.error({ err: err.message }, "clanker: handler threw"));
       }
     },
-    onError: (err) => logger.error({ err: err.message }, "clanker: watcher error"),
+    onError: (err) => logWatcherError(logger, err, "clanker: watcher error"),
   });
   logger.info({ contract: FACTORY() }, "clanker discovery started");
 };
