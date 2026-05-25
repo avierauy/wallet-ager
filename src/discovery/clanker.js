@@ -78,13 +78,15 @@ export const handleTokenCreated = async ({ tokenAddress, tokenSymbol, pairedToke
 
   // Hash matched — store the full PoolKey and probe via Quoter. The Clanker MEV hook usually
   // blocks the first ~10-30 seconds of swaps, so a single probe often reverts. We register
-  // the token first, then run a background poll that fires the sniper once Quoter accepts.
+  // the token as PENDING first; the poll's onReady promotes to ACTIVE when Quoter accepts,
+  // or onTimeout (P1) marks EXPIRED when the hook never opens. Keeping PENDING during the
+  // window means the aging scheduler (getActive) cannot pick a token whose pool would revert.
   const fullPoolMetadata = {
     version: "v4", poolId,
     currency0: resolved.currency0, currency1: resolved.currency1,
     fee: resolved.fee, tickSpacing: resolved.tickSpacing, hooks: resolved.hooks,
   };
-  add({ ...baseToken, status, poolMetadata: fullPoolMetadata });
+  add({ ...baseToken, status: STATUS.PENDING, poolMetadata: fullPoolMetadata });
 
   const zeroForOne = pairedToken.toLowerCase() === resolved.currency0.toLowerCase();
   const quoteOnce = () => quoteV4Pool({
@@ -112,6 +114,10 @@ export const handleTokenCreated = async ({ tokenAddress, tokenSymbol, pairedToke
       return null;
     },
     onReady: (result, attempts) => {
+      // Promote PENDING → ACTIVE so the aging scheduler can pick this token for future sells.
+      // (tryFireSniperBuy below takes the token object directly and would fire either way,
+      // but the planner uses getActive() which filters by status=active.)
+      add({ ...baseToken, status: STATUS.ACTIVE, poolMetadata: fullPoolMetadata });
       logger.info(
         { token: tokenAddress, symbol: tokenSymbol, attempts, amountOut: result.amountOut.toString() },
         "clanker: pool became tradeable — firing sniper"

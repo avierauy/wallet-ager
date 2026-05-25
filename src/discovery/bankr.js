@@ -162,15 +162,17 @@ export const handleAirlockCreate = async ({ asset, numeraire, initializer, poolO
     return { added: true, status, source, initializer, poolOrHook };
   }
 
-  // Neither V3 nor an initial V4 candidate quote returned. Register as pending and start a
-  // background poll: retry the full V4 brute-force every ~5s until the hook lets us in or
-  // we time out. AlphaRouter is not invoked in this path — the sniper only fires from
-  // the poll's onReady callback.
+  // Neither V3 nor an initial V4 candidate quote returned. Register as PENDING (not ACTIVE)
+  // and start a background poll: retry the full V4 brute-force every ~5s until the hook
+  // lets us in or we time out. AlphaRouter is not invoked in this path — the sniper only
+  // fires from the poll's onReady callback, which also promotes the row to ACTIVE.
+  // PENDING means: discovered, pool not yet confirmed tradeable. The planner (getActive)
+  // skips PENDING rows so the aging scheduler won't pick a token whose pool may revert.
   const pendingMetadata = {
     version: "v4-or-v3", poolOrHook, pairedToken: numeraire,
     tokenAddress: asset, pending: true,
   };
-  add({ ...baseToken, status, poolMetadata: pendingMetadata });
+  add({ ...baseToken, status: STATUS.PENDING, poolMetadata: pendingMetadata });
   logger.info(
     { asset, symbol: meta.symbol, status, source, initializer, poolOrHook,
       poolVersion: "v4-or-v3", poolKeyResolved: false },

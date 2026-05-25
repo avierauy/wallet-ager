@@ -138,4 +138,28 @@ describe("sweeper", () => {
     const summary = await sweepOnce({ now });
     assert.equal(summary.markedUnsafe, 1);
   });
+
+  test("uniswap-launchpad tokens (clanker-*/doppler-*) skip honeypot re-check", async () => {
+    // P2: Launchpad tokens were never honeypot-checked at discovery (trusted template).
+    // The sweeper must skip the re-check too — otherwise it wastes RPC, and a "safe" verdict
+    // would wrongly promote a PENDING row to ACTIVE while the V4 hook is still blocking swaps.
+    const CLANKER = "0x" + "c".repeat(40);
+    const DOPPLER = "0x" + "d".repeat(40);
+    seedToken({ address: CLANKER, tradeableOn: ["uniswap"], source: "clanker-v4" });
+    seedToken({ address: DOPPLER, tradeableOn: ["uniswap"], source: "doppler-bankr" });
+    const now = Date.now();
+    setActivity({ address: CLANKER, discoveredAt: now - 1000, lastTradedAt: now - 500 });
+    setActivity({ address: DOPPLER, discoveredAt: now - 1000, lastTradedAt: now - 500 });
+    let fetchCalls = 0;
+    globalThis.fetch = async () => { fetchCalls++; return { ok: true, json: async () => safeVerdict }; };
+
+    const summary = await sweepOnce({ now });
+
+    assert.equal(fetchCalls, 0, "honeypot.is must not be called for launchpad sources");
+    assert.equal(summary.rechecked, 0, "no safety re-check should be counted");
+    assert.equal(summary.skipped, 2, "both launchpad rows should be skipped");
+    // Tokens still ACTIVE — sweeper didn't touch them.
+    assert.ok(getActive().some((t) => t.address.toLowerCase() === CLANKER.toLowerCase()));
+    assert.ok(getActive().some((t) => t.address.toLowerCase() === DOPPLER.toLowerCase()));
+  });
 });

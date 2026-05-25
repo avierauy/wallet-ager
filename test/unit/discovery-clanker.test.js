@@ -7,6 +7,7 @@ import { db } from "../../src/core/db.js";
 import { _listAll, _resetStaticCache, getActive } from "../../src/core/tokenRegistry.js";
 
 const sim = await import("../../src/safety/simulation.js");
+const { _internals } = await import("../../src/discovery/v4PoolKey.js");
 const { handleTokenCreated } = await import("../../src/discovery/clanker.js");
 
 const WETH = "0x4200000000000000000000000000000000000006";
@@ -14,6 +15,14 @@ const WETH = "0x4200000000000000000000000000000000000006";
 const TOKEN = "0xcc11abcdef0123456789abcdef0123456789abcd";
 const POOL_ID = "0xaaa1111111111111111111111111111111111111111111111111111111111111";
 const POOL_HOOK = "0x0000000000000000000000000000000000000000";
+
+// Match the first candidate so resolveV4PoolKey succeeds → handler enters the polling branch.
+const TOKEN_HASH_MATCH = "0xbb22abcdef0123456789abcdef0123456789abcd";
+const [c0, c1] = _internals.sortCurrencies(TOKEN_HASH_MATCH, WETH);
+const cand = _internals.DEFAULT_CANDIDATES[0];
+const POOL_ID_HASH_MATCH = _internals.computePoolId({
+  currency0: c0, currency1: c1, fee: cand.fee, tickSpacing: cand.tickSpacing, hooks: POOL_HOOK,
+});
 
 const restore = () => sim._resetDeps();
 
@@ -63,7 +72,11 @@ describe("clanker discovery handler", () => {
     assert.equal(result.skipped, "non-weth-paired-token");
   });
 
-  test("WETH-paired token registered as ACTIVE with source clanker-v4", async () => {
+  test("no-pool-key fallback → ACTIVE (AlphaRouter path)", async () => {
+    // POOL_ID does not match any canonical candidate hash → resolveV4PoolKey returns null →
+    // handler takes the fallback branch: registers ACTIVE and fires the sniper via AlphaRouter.
+    // P2 preserves ACTIVE here per the design decision (the fallback is the only way this path
+    // can ever fire, so we don't want to gate it behind a Quoter probe).
     stubFetch(safeVerdict);
     const result = await handleTokenCreated({
       tokenAddress: TOKEN, tokenSymbol: "CLNK",
@@ -76,5 +89,31 @@ describe("clanker discovery handler", () => {
     assert.equal(row.symbol, "CLNK");
     assert.equal(row.source, "clanker-v4");
     assert.deepEqual(row.tradeableOn, ["uniswap"]);
+    const dbRow = db
+      .prepare("SELECT status FROM discovered_tokens WHERE address = ? COLLATE NOCASE")
+      .get(TOKEN);
+    assert.equal(dbRow.status, "active", "fallback path must persist as ACTIVE");
+  });
+
+  test("hash-matched poolId → PENDING (poll still in flight)", async () => {
+    // POOL_ID_HASH_MATCH is computed to collide with the first DEFAULT_CANDIDATES entry, so
+    // resolveV4PoolKey succeeds and the handler enters the polling branch. P2 requires this
+    // row to be inserted as PENDING — not ACTIVE — so the aging scheduler doesn't pick it
+    // before the MEV hook has confirmed swappability. onTimeout (P1) marks EXPIRED on failure;
+    // onReady promotes to ACTIVE on success (covered by clanker-timeout test for the failure path).
+    const result = await handleTokenCreated({
+      tokenAddress: TOKEN_HASH_MATCH, tokenSymbol: "CLNK2",
+      pairedToken: WETH, poolId: POOL_ID_HASH_MATCH, poolHook: POOL_HOOK,
+    });
+    assert.equal(result.added, true);
+    const dbRow = db
+      .prepare("SELECT status FROM discovered_tokens WHERE address = ? COLLATE NOCASE")
+      .get(TOKEN_HASH_MATCH);
+    assert.equal(dbRow.status, "pending", "hash-matched + polling path must persist as PENDING");
+    assert.equal(
+      getActive().some((t) => t.address.toLowerCase() === TOKEN_HASH_MATCH.toLowerCase()),
+      false,
+      "PENDING tokens must NOT appear in getActive()"
+    );
   });
 });

@@ -108,8 +108,11 @@ describe("bankr airlock discovery", () => {
   });
 
   test("Doppler tokens skip honeypot probe — trusted launchpad template", async () => {
-    // Phase A: Doppler uses standard ERC20 templates with no rug surface. The discovery handler
-    // must NOT call honeypot.is and must register as ACTIVE regardless of any external verdict.
+    // Doppler uses standard ERC20 templates with no rug surface. The discovery handler must
+    // NOT call honeypot.is — the templated contract is trusted regardless of any external
+    // verdict. (P2: when the V4 probes fail, the row lands as PENDING and only becomes
+    // ACTIVE after the poll's onReady confirms the pool is swappable. Safety bypass is
+    // independent of the active-vs-pending lifecycle.)
     stubReads({ symbol: "RUG" });
     let fetchCalled = false;
     globalThis.fetch = async () => { fetchCalled = true; return { ok: true, json: async () => honeypotVerdict }; };
@@ -122,8 +125,6 @@ describe("bankr airlock discovery", () => {
     assert.equal(fetchCalled, false, "honeypot.is must not be called for Doppler tokens");
     const row = _listAll().find((t) => t.address.toLowerCase() === RUG_TOKEN.toLowerCase());
     assert.ok(row, "token should be registered");
-    assert.ok(getActive().some((t) => t.address.toLowerCase() === RUG_TOKEN.toLowerCase()),
-      "token should appear in active list (bypass safety)");
   });
 
   test("poolMetadata is recorded with version + initializer hint", async () => {
@@ -136,5 +137,26 @@ describe("bankr airlock discovery", () => {
     assert.equal(row.poolMetadata.version, "v4-or-v3");
     assert.equal(row.poolMetadata.pending, true);
     assert.equal(row.poolMetadata.poolOrHook?.toLowerCase(), POOL.toLowerCase());
+  });
+
+  test("V3/V4 probes failed → row inserted as PENDING (poll still in flight)", async () => {
+    // Both V3 probe (token0/token1/fee) and V4 Quoter brute-force fail per stubReads. The
+    // handler enters the polling branch which must insert as PENDING — not ACTIVE — so the
+    // planner's getActive() does not yield this token to the aging scheduler before the
+    // V4 hook has confirmed the pool is swappable. The onTimeout in P1 then promotes to
+    // EXPIRED, and the onReady promotes to ACTIVE.
+    stubReads({ symbol: "PEND" });
+    await handleAirlockCreate({
+      asset: NEW_TOKEN, numeraire: WETH, initializer: INITIALIZER, poolOrHook: POOL,
+    });
+    const dbRow = db
+      .prepare("SELECT status FROM discovered_tokens WHERE address = ? COLLATE NOCASE")
+      .get(NEW_TOKEN);
+    assert.equal(dbRow.status, "pending", "polling path must insert as PENDING");
+    assert.equal(
+      getActive().some((t) => t.address.toLowerCase() === NEW_TOKEN.toLowerCase()),
+      false,
+      "PENDING tokens must NOT appear in getActive()"
+    );
   });
 });

@@ -23,8 +23,20 @@ import { inc } from "../util/metrics.js";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
+// Clanker and Doppler tokens trade through Uniswap pools but their contracts come from
+// trusted launchpad templates — we deliberately skip the honeypot probe at discovery time
+// (clanker.js / bankr.js). Running it during sweep would also be wasted RPC, and worse,
+// a "safe" verdict could promote a PENDING launchpad row to ACTIVE even though the V4 hook
+// is still blocking swaps. The poll's onReady/onTimeout (in the discovery handlers) is the
+// authoritative signal for those rows; TTL handles eviction if neither fires.
+//
+// Virtuals tokens still re-check via checkBondingCurve — that detects a drained curve
+// (a real safety signal post-discovery), not a template-level rug.
+const isUniswapLaunchpad = (token) => /^(clanker-|doppler-)/.test(token.source ?? "");
+
 const pickSafetyCheck = (token) => {
   if (token.tradeableOn?.includes("virtuals")) return () => checkBondingCurve({ agentToken: token.address });
+  if (isUniswapLaunchpad(token)) return null;
   if (token.tradeableOn?.includes("uniswap")) return () => checkToken(token.address);
   return null;
 };
