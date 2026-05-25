@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
 import { notifyApproval } from "../notify/telegram.js";
 import { SkipExecution } from "../util/errors.js";
+import { logger } from "../util/logger.js";
 import { waitForAllowance } from "../util/waitForAllowance.js";
 import * as uniswap from "./uniswap.js";
 
@@ -198,12 +199,26 @@ export const executeBuyFlow = async ({ wallet, agentToken, plannedAmountInWei, s
   const expectedOut = await quoteVirtualToAgent({ agentToken: agentTokenAddress, amountInVirtualWei: virtualBalance });
   const minOut = applySlippage(expectedOut, slippageBps);
 
-  const buyTx = await buyPreGrad({
-    account,
-    agentToken: agentTokenAddress,
-    amountInVirtualWei: virtualBalance,
-    minOutWei: minOut,
-  });
+  // BondingV5.buy can revert on-chain for reasons the Quoter doesn't surface (token
+  // graduated mid-cycle, bonding curve closed, hook rejection). Catch those and convert
+  // to SkipExecution so the daily cap slot isn't burned and the operator doesn't get
+  // spammed with notifyError for a structural condition we can't fix.
+  let buyTx;
+  try {
+    buyTx = await buyPreGrad({
+      account,
+      agentToken: agentTokenAddress,
+      amountInVirtualWei: virtualBalance,
+      minOutWei: minOut,
+    });
+  } catch (err) {
+    if (/execution reverted|reverted/i.test(err.message ?? "")) {
+      throw new SkipExecution(
+        `BondingV5.buy reverted (token graduated or pool closed): ${err.message.slice(0, 120)}`
+      );
+    }
+    throw err;
+  }
 
   return {
     txHash: buyTx,
@@ -214,8 +229,41 @@ export const executeBuyFlow = async ({ wallet, agentToken, plannedAmountInWei, s
   };
 };
 
-// Sell flow: approve agent token → BondingV5.sell. Resulting VIRTUAL stays in the wallet for
-// future Virtuals buys (per user spec).
+// Convert any VIRTUAL balance in the wallet to ETH via Uniswap. Idempotent on the
+// approve step (approveTokenToPermit2 is a no-op if max allowance is already in place).
+// Returns { skipped: "no-balance" } if the wallet has nothing above dust, or the swap
+// result otherwise. Surface errors but DO NOT throw — the caller (sell flow / startup
+// drain) treats the VIRTUAL→ETH leg as best-effort cleanup: if it fails the wallet
+// keeps the VIRTUAL but the agent-token sell still counts as a completed roundtrip.
+export const drainAccumulatedVirtual = async ({ account, slippageBps = 500 }) => {
+  const virtualBalance = await readVirtualBalance(account);
+  if (virtualBalance < VIRTUAL_DUST_WEI) {
+    return { skipped: "no-balance", balance: virtualBalance.toString() };
+  }
+  // Ensure Permit2 has unlimited allowance from this wallet on VIRTUAL. No-op if it
+  // already does (the helper checks current allowance and skips if >= MAX/2).
+  await uniswap.approveTokenToPermit2({ account, token: VIRTUAL_TOKEN() });
+  const swap = await uniswap.sellExactTokenForEth({
+    account,
+    tokenIn: { address: VIRTUAL_TOKEN(), decimals: 18, symbol: "VIRTUAL" },
+    amountInWei: virtualBalance,
+    slippageBps,
+  });
+  return {
+    drained: true,
+    virtualAmountWei: virtualBalance.toString(),
+    txHash: swap.txHash,
+  };
+};
+
+// Sell flow: approve agent token → BondingV5.sell → sell resulting VIRTUAL to ETH on
+// Uniswap. Each cycle ends with the wallet holding ETH only, so the next buy starts
+// from a known state (virtualBalance < DUST) and the executeBuyFlow pre-flight A check
+// can correctly bail when the planned ETH is too small.
+//
+// The VIRTUAL→ETH leg is best-effort: if it fails (Uniswap reverts, RPC error), the
+// agent-token sell is still considered successful and we log a warning. The next
+// startup drain or a later cycle's VIRTUAL→ETH attempt can pick up the residual.
 export const executeSellFlow = async ({ wallet, agentToken, amountInWei, slippageBps }) => {
   const account = wallet.account;
   const agentTokenAddress = typeof agentToken === "string" ? agentToken : agentToken.address;
@@ -253,9 +301,27 @@ export const executeSellFlow = async ({ wallet, agentToken, amountInWei, slippag
     minOutVirtualWei: minOut,
   });
 
+  // Wait for the BondingV5.sell receipt before swapping the resulting VIRTUAL —
+  // otherwise the Uniswap path sees a stale (lower) VIRTUAL balance.
+  await publicClient.waitForTransactionReceipt({ hash: sellTx });
+
+  // Close the roundtrip: dump the newly-received VIRTUAL to ETH. Best-effort: a failure
+  // here doesn't unwind the agent-token sell, just leaves VIRTUAL in the wallet for the
+  // next drain (either at startup or the next sell flow's call to this same helper).
+  let virtualToEth = null;
+  try {
+    virtualToEth = await drainAccumulatedVirtual({ account, slippageBps });
+  } catch (err) {
+    logger.warn(
+      { walletId: wallet.id, err: err.message, agentToken: agentTokenAddress },
+      "virtuals: VIRTUAL→ETH leg failed; agent sell succeeded but VIRTUAL stays in wallet"
+    );
+  }
+
   return {
     txHash: sellTx,
     expectedVirtualOutWei: expectedOut.toString(),
     minVirtualOutWei: minOut.toString(),
+    virtualToEth, // { drained, virtualAmountWei, txHash } | { skipped: "no-balance" } | null
   };
 };

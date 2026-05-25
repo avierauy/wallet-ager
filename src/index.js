@@ -1,6 +1,7 @@
 // MUST be first — installs global process guards before brotli/SOR get loaded transitively.
 // See src/util/processGuards.js for the full rationale.
 import "./util/processGuards.js";
+import { drainAccumulatedVirtual } from "./adapters/virtuals.js";
 import { config } from "./config.js";
 import { ensureInitialSnapshot, fetchTokenPrices } from "./core/balanceTracker.js";
 import "./core/db.js"; // trigger schema init
@@ -67,6 +68,28 @@ async function main() {
     await notifyInfo(
       `wallet-ager started — ${wallets.length} wallets, chain=${config.chain.name}, dry-run=${config.runtime.dryRun}`
     );
+  }
+
+  // One-shot legacy cleanup: prior sessions could leave VIRTUAL accumulated in wallets
+  // when the agent-token sell did not auto-convert back to ETH. Each Virtuals cycle now
+  // closes the roundtrip itself (see executeSellFlow), but wallets that built up balance
+  // before this change still hold VIRTUAL. Drain it here so the next Virtuals snipe starts
+  // from virtualBalance < DUST and the pre-flight A check can correctly bail when the
+  // planned ETH is too small. Best-effort: errors are logged and the daemon continues.
+  if (!config.runtime.dryRun) {
+    await Promise.all(wallets.map(async (wallet) => {
+      try {
+        const r = await drainAccumulatedVirtual({ account: wallet.account });
+        if (r.drained) {
+          logger.info(
+            { walletId: wallet.id, virtualAmountWei: r.virtualAmountWei, txHash: r.txHash },
+            "startup: drained accumulated VIRTUAL to ETH"
+          );
+        }
+      } catch (err) {
+        logger.warn({ walletId: wallet.id, err: err.message }, "startup VIRTUAL drain failed (continuing)");
+      }
+    }));
   }
 
   initSniper(wallets);
