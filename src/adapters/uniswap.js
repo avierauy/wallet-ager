@@ -40,6 +40,12 @@ const toCurrency = ({ address, decimals, symbol }) => {
   return new Token(config.chain.chainId, address, decimals, symbol);
 };
 
+// Soft-error patterns that mean "router couldn't price this trade right now" — almost always
+// the V4 subgraph lagging behind chain state on fresh launches. We collapse them into the
+// same "no route found" surface the executor already knows how to treat as a failed trade,
+// instead of letting the raw stack escape and risk an unhandled rejection.
+const SUBGRAPH_SOFT_ERROR = /(failed to get subgraph pools|subgraph|no route)/i;
+
 // quote: returns the AlphaRouter SwapRoute (covers V2/V3/V4 + splits). `methodParameters` has
 // `{ to, calldata, value }` ready to forward to viem.
 export const quote = async ({ tokenIn, tokenOut, amountInWei, slippageBps, recipient, inputTokenPermit }) => {
@@ -47,15 +53,25 @@ export const quote = async ({ tokenIn, tokenOut, amountInWei, slippageBps, recip
   const inCur = toCurrency(tokenIn);
   const outCur = toCurrency(tokenOut);
   const amount = CurrencyAmount.fromRawAmount(inCur, amountInWei.toString());
-  const route = await router.route(amount, outCur, TradeType.EXACT_INPUT, {
-    recipient,
-    slippageTolerance: new Percent(slippageBps, 10_000),
-    deadline: Math.floor(Date.now() / 1000) + 1800,
-    type: SwapType.UNIVERSAL_ROUTER,
-    version: UR_VERSION,    // smart-order-router reads this for UNIVERSAL_ROUTER_ADDRESS lookup
-    urVersion: UR_VERSION,  // universal-router-sdk reads this for command ABI selection (V2_1_1 adds minHopPriceX36)
-    ...(inputTokenPermit ? { inputTokenPermit } : {}),
-  });
+  let route;
+  try {
+    route = await router.route(amount, outCur, TradeType.EXACT_INPUT, {
+      recipient,
+      slippageTolerance: new Percent(slippageBps, 10_000),
+      deadline: Math.floor(Date.now() / 1000) + 1800,
+      type: SwapType.UNIVERSAL_ROUTER,
+      version: UR_VERSION,    // smart-order-router reads this for UNIVERSAL_ROUTER_ADDRESS lookup
+      urVersion: UR_VERSION,  // universal-router-sdk reads this for command ABI selection (V2_1_1 adds minHopPriceX36)
+      ...(inputTokenPermit ? { inputTokenPermit } : {}),
+    });
+  } catch (err) {
+    const msg = String(err?.message ?? err);
+    if (SUBGRAPH_SOFT_ERROR.test(msg)) {
+      logger.warn({ err: msg.slice(0, 200) }, "AlphaRouter subgraph soft-error — treating as no route");
+      throw new Error("no route found");
+    }
+    throw err;
+  }
   if (!route) throw new Error("no route found");
   return route;
 };

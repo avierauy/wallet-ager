@@ -116,6 +116,15 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
       );
       const delayMin = sampleUniform(sniper.sellDelayMin, rng);
       scheduleSell({ wallet, token, delayMs: delayMin * 60 * 1000, sniper });
+    } else if (result.status === "skipped") {
+      // Skip didn't broadcast and didn't consume a daily slot — release the cooldown
+      // reservation so this wallet stays available for the next fresh-launch event.
+      sniperState.delete(wallet.id);
+      inc("sniper", { outcome: "skip-released" });
+      logger.info(
+        { walletId: wallet.id, token: token.symbol, reason: result.error },
+        "sniper: skipped — cooldown released"
+      );
     }
     return { fired: true, walletId: wallet.id, result };
   } catch (err) {

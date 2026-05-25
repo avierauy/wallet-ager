@@ -2,6 +2,7 @@ import { concat, encodeFunctionData, erc20Abi, parseAbi } from "viem";
 import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
 import { notifyApproval } from "../notify/telegram.js";
+import { SkipExecution } from "../util/errors.js";
 import { waitForAllowance } from "../util/waitForAllowance.js";
 import * as uniswap from "./uniswap.js";
 
@@ -25,6 +26,14 @@ const MARKER = () => config.chain.dexes.virtuals.frontendMarker;
 
 // Below this many wei of VIRTUAL the wallet is considered to have none.
 const VIRTUAL_DUST_WEI = 10n ** 15n; // 0.001 VIRTUAL
+
+// Pre-flight minimum: a Virtuals snipe requires acquiring at least DUST_WEI of $VIRTUAL on
+// Uniswap. If the planned ETH amount is too small, slippage + thin liquidity can result in a
+// post-acquisition balance below the dust threshold — the bonding curve then refuses to fire
+// and the swap stays in the wallet as stuck dust. Skipping pre-flight when ETH < this minimum
+// avoids wasting gas on a doomed acquisition. Calibrated for ~$5 USD spend at $3500/ETH,
+// which gives a comfortable 5000x margin over the VIRTUAL dust threshold at $1/VIRTUAL.
+const MIN_ETH_FOR_VIRTUALS_WEI = 1_500_000_000_000_000n; // 0.0015 ETH
 
 const applySlippage = (amount, bps) => (amount * BigInt(10000 - bps)) / 10000n;
 
@@ -130,6 +139,15 @@ export const executeBuyFlow = async ({ wallet, agentToken, plannedAmountInWei, s
   let acquisition = null;
 
   if (virtualBalance < VIRTUAL_DUST_WEI) {
+    // (A) Pre-flight: bail BEFORE broadcasting the Uniswap acquisition when the planned ETH
+    // is too small to reliably produce a usable VIRTUAL balance. Avoids the failure mode
+    // where the acquisition succeeds but lands sub-dust, leaving stuck VIRTUAL in the wallet
+    // and wasting gas. SkipExecution → executor returns status="skipped", no slot consumed.
+    if (plannedAmountInWei < MIN_ETH_FOR_VIRTUALS_WEI) {
+      throw new SkipExecution(
+        `Virtuals snipe skipped: planned ETH ${plannedAmountInWei} below minimum ${MIN_ETH_FOR_VIRTUALS_WEI} (no usable VIRTUAL in wallet)`
+      );
+    }
     const uniRes = await uniswap.buyExactEthForToken({
       account,
       tokenOut: { address: VIRTUAL_TOKEN(), decimals: 18, symbol: "VIRTUAL" },
@@ -139,8 +157,14 @@ export const executeBuyFlow = async ({ wallet, agentToken, plannedAmountInWei, s
     await publicClient.waitForTransactionReceipt({ hash: uniRes.txHash });
     virtualBalance = await readVirtualBalance(account);
     acquisition = { txHash: uniRes.txHash, virtualAcquiredWei: virtualBalance.toString() };
+    // (C) Recovery posture: if the acquisition still landed sub-dust (catastrophic slippage,
+    // tx reverted but mined, etc.) skip cleanly instead of throwing as a hard failure. The
+    // acquired VIRTUAL stays in the wallet — the next Virtuals snipe on this wallet will
+    // pick up the accumulated balance via the recovery branch above (virtualBalance >= DUST).
     if (virtualBalance < VIRTUAL_DUST_WEI) {
-      throw new Error("VIRTUAL acquisition via Uniswap produced negligible balance");
+      throw new SkipExecution(
+        `VIRTUAL acquired (${virtualBalance}) still below dust ${VIRTUAL_DUST_WEI}; keeping for retry`
+      );
     }
   }
 

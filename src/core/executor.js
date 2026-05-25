@@ -4,6 +4,7 @@ import * as virtuals from "../adapters/virtuals.js";
 import { config } from "../config.js";
 import { notifyApproval, notifyError, notifyTrade } from "../notify/telegram.js";
 import { checkBeforeSell, checkBondingCurve, checkToken } from "../safety/index.js";
+import { SkipExecution } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { inc } from "../util/metrics.js";
 import { withRetry } from "../util/retry.js";
@@ -257,6 +258,18 @@ export const executeAction = async ({ wallet, plan }) => {
     );
     return { status: "submitted", txHash: dispatched.txHash };
   } catch (err) {
+    // Adapter-initiated skip (e.g., Virtuals pre-flight): clean no-op, not a failure. Same
+    // surface as a safety-check rejection — sniper releases its cooldown, no Telegram noise.
+    if (err instanceof SkipExecution) {
+      updateTrade(tradeId, { status: "skipped", error: err.message });
+      inc("trade", { status: "skipped", dex: plan.dex, side: plan.side });
+      logger.info(
+        { walletId: wallet.id, walletAddress: wallet.account.address,
+          dex: plan.dex, side: plan.side, reason: err.message },
+        "execution skipped — pre-flight check"
+      );
+      return { status: "skipped", error: err.message };
+    }
     updateTrade(tradeId, { status: "failed", error: err.message });
     inc("trade", { status: "failed", dex: plan.dex, side: plan.side });
     // Sniper retries set plan.silentOnFail so the operator only gets a Telegram message

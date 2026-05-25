@@ -1,3 +1,6 @@
+// MUST be first — installs global process guards before brotli/SOR get loaded transitively.
+// See src/util/processGuards.js for the full rationale.
+import "./util/processGuards.js";
 import { config } from "./config.js";
 import { ensureInitialSnapshot, fetchTokenPrices } from "./core/balanceTracker.js";
 import "./core/db.js"; // trigger schema init

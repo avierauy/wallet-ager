@@ -141,4 +141,19 @@ describe("sniper", () => {
     const { _state } = await import("../../src/orchestrator/sniper.js");
     assert.equal(_state().pendingSells, 1);
   });
+
+  test("skipped result releases the wallet's cooldown so it stays snipe-eligible", async () => {
+    // Single wallet — if cooldown is NOT released after a skip, the second snipe attempt
+    // will fail with "no-eligible-wallet". The release lets the second attempt fire.
+    initSniper([makeWallet("w1")]);
+    const exec = mockExecutor(["skipped", "submitted"]);
+    _setDeps({ executeAction: exec.fn });
+    const r1 = await tryFireSniperBuy({ token: TOKEN });
+    const r2 = await tryFireSniperBuy({ token: { ...TOKEN, address: "0x" + "b".repeat(40) } });
+    assert.equal(r1.fired, true);
+    assert.equal(r1.result.status, "skipped");
+    assert.equal(r2.fired, true);
+    assert.equal(r2.result.status, "submitted");
+    assert.equal(exec.calls.length, 2);
+  });
 });
