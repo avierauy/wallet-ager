@@ -149,3 +149,50 @@ Validación en vivo del arc v13.0–v13.9 + descubrimiento y fix de un gap UX en
 
 ### Pickup point
 Session terminada con `git status` clean en `main` (excepto MEMORY.md que está modificado con este resumen, pendiente de commit aparte). 11 tags v13 (v13.0–v13.10). Daemon parado, DB wipeada. SilverBullet+ actualizado (`decisions/2026-05-25-telegram-via-line.md` nuevo, `projects/wallet-ager.md` bumped a v13.10, `index.md` con link nuevo). Próximo paso al volver: commit del MEMORY.md como `docs: session summary 2026-05-25 PM`, después pedir confirmación per-msg para próxima corrida si querés validar pending #1 o #2.
+
+---
+
+## Session 2026-05-25 evening — v13.11 + v13.12 discovery DB cleanup
+
+### Worked on
+Auditoría de qué se persiste en `discovered_tokens` cuando un snipe no llega a ejecutarse. Identificación de waste en path Doppler/Clanker (rows ACTIVE quedando hasta 48h por TTL aunque el poll del V4 Quoter timeout en 30-66s). Diseño y entrega de 2 commits incrementales (P1 minimal + P2 lifecycle).
+
+### Completed
+
+**v13.11 — P1: markExpired on V4 poll timeout**
+- `src/discovery/bankr.js` y `src/discovery/clanker.js`: `onTimeout` ahora llama `markExpired` + `deleteApprovalsForToken`. Antes solo loggeaba WARN.
+- Nuevos env knobs `CLANKER_POLL_INTERVAL_MS` y `CLANKER_POLL_MAX_ATTEMPTS` (mirroreando `DOPPLER_POLL_MAX_MS`) para tests rápidos del timeout.
+- 2 tests nuevos: `discovery-bankr-timeout.test.js` + `discovery-clanker-timeout.test.js` — corren el poller real con ceiling chico y verifican EXPIRED + approvals dropped.
+- Commit `c6e42a3`. 244/244 tests passing.
+
+**v13.12 — P2: PENDING durante poll + sweeper skip honeypot launchpads**
+- Doppler path poll-pending (`bankr.js:172`) ahora inserta `STATUS.PENDING` en vez de ACTIVE. V3 probe success y V4 quoter-first-try success siguen ACTIVE (pool confirmado).
+- Clanker path hash-matched + poll (`clanker.js:81`) ahora inserta `STATUS.PENDING`. `onReady` agrega `add()` explícito para promover ACTIVE.
+- Clanker fallback sin pool key (`clanker.js:63`) PRESERVADO ACTIVE — única forma que fire via AlphaRouter, decisión consciente.
+- Virtuals SIN cambios (BondingV5 siempre tradeable pre-grad).
+- Sweeper `pickSafetyCheck` skip para `clanker-*`/`doppler-*` sources — antes corría honeypot.is wasteful y peor, un "safe" verdict podría promover wrongly un PENDING a ACTIVE mientras el hook V4 aún bloquea.
+- 3 tests nuevos / actualizados: bankr (PENDING insert), clanker (PENDING + fallback ACTIVE), sweeper (skip launchpad re-check).
+- Commit `6e397df`. 247/247 tests passing.
+
+### Decisiones clave (full detail en SilverBullet+)
+Detalle granular en [[decisions/2026-05-25-discovery-db-cleanup]]:
+- P1 (minimal): por qué `markExpired` en `onTimeout` ataca el 80% del waste real con cambio chico.
+- P2 (PENDING): por qué el state machine PENDING/ACTIVE separa lifecycle de discovery vs lifecycle de tradeability.
+- Por qué NO tocar Virtuals (curva BondingV5 ≠ pool con MEV hook).
+- Por qué preservar Clanker AlphaRouter fallback en ACTIVE.
+
+### Rechazado
+- **Propuesta 3** (no persistir hasta pool confirmado): pierde audit trail, beneficio marginal sobre P2.
+- Aplicar PENDING también a Virtuals: BondingV5 no tiene fase "no confirmado", la curva siempre acepta hasta graduación.
+- Kill del Clanker AlphaRouter fallback: bajo éxito histórico pero es la única ruta que fire cuando hash no matchea, gating la mataría.
+
+### En progreso / pendiente para próxima sesión
+1. **Validación en vivo v13.11+v13.12** — observar `dbByStatus` post-arranque. Esperar ver:
+   - Rows `pending` mientras hay polls activos
+   - Rows `expired` con `reason: "doppler-poll-timeout"` / `clanker-poll-timeout (N attempts)`
+   - Cero llamadas honeypot.is del sweeper sobre launchpads (visible con LOG_LEVEL=debug)
+2. **Sweeper TTL en vivo ≥6h** — sigue pendiente desde sesión PM (cap saturation paraba corridas antes).
+3. **EOD cleanup 23:30 UTC** — sigue pendiente.
+
+### Pickup point
+Session terminada. Commits `c6e42a3` y `6e397df` en `main`, pusheados a origin. 11 tags v13.x previos + 2 nuevos en este push (sin nuevos tags, los commits son v13.11 y v13.12 en mensaje pero sin tag — el versionado en mensaje commit es suficiente, el repo no tiene política de tag-per-version estricta). Daemon parado, DB wipeada (no existe `data/wallet-ager.db` — solo backups del 2026-05-25 PM). Próximo paso: pedir confirmación per-msg para `npm start` y validar pending #1 en vivo.
