@@ -2,6 +2,7 @@ import { describe, test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   db,
+  deleteApprovalsForToken,
   recordApproval,
   hasApproval,
   insertTrade,
@@ -65,5 +66,18 @@ describe("sqlite persistence", () => {
     assert.equal(row.status, "confirmed");
     assert.equal(row.tx_hash, "0xfeed");
     assert.equal(row.confirmed_at, 2);
+  });
+
+  test("deleteApprovalsForToken drops all rows for a token (case-insensitive)", () => {
+    const TOK = "0x3333333333333333333333333333333333333333";
+    const OTHER = "0x4444444444444444444444444444444444444444";
+    recordApproval({ wallet_id: "wA", token: TOK, spender: "0x" + "a".repeat(40), tx_hash: "0x01", granted_at: 1 });
+    recordApproval({ wallet_id: "wB", token: TOK, spender: "0x" + "b".repeat(40), tx_hash: "0x02", granted_at: 2 });
+    recordApproval({ wallet_id: "wA", token: OTHER, spender: "0x" + "a".repeat(40), tx_hash: "0x03", granted_at: 3 });
+    // Call with mixed case to confirm normalization
+    const removed = deleteApprovalsForToken(TOK.toUpperCase());
+    assert.equal(removed, 2);
+    assert.equal(hasApproval({ wallet_id: "wA", token: TOK, spender: "0x" + "a".repeat(40) }), false);
+    assert.equal(hasApproval({ wallet_id: "wA", token: OTHER, spender: "0x" + "a".repeat(40) }), true);
   });
 });

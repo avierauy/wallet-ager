@@ -8,6 +8,7 @@
 //       honeypot.is for uniswap). If now unsafe, mark UNSAFE.
 //     - Otherwise refresh safety_checked_at and leave it active.
 import { config } from "../config.js";
+import { deleteApprovalsForToken } from "../core/db.js";
 import {
   _listAll,
   markExpired,
@@ -58,6 +59,7 @@ export const sweepOnce = async ({ now = Date.now(), ttlHours = config.discovery.
     const idleMs = now - lastActivityMs(token);
     if (idleMs > ttlMs) {
       markExpired({ address: token.address, reason: `idle ${Math.round(idleMs / ONE_HOUR_MS)}h > ttl ${ttlHours}h` });
+      deleteApprovalsForToken(token.address);
       expired++;
       inc("discovery-sweep", { outcome: "expired" });
       continue;
@@ -76,6 +78,7 @@ export const sweepOnce = async ({ now = Date.now(), ttlHours = config.discovery.
       }
       if (!verdict.safe) {
         markUnsafe({ address: token.address, reason: (verdict.reasons || []).join("; ") });
+        deleteApprovalsForToken(token.address);
         markedUnsafe++;
         inc("discovery-sweep", { outcome: "unsafe" });
         continue;

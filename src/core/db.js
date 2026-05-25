@@ -231,6 +231,12 @@ export const hasApproval = ({ wallet_id, token, spender }) =>
     )
     .get(wallet_id, token, spender);
 
+// Drop all approval rows for a given token (across wallets/spenders). Called by the
+// sweeper when a token is marked EXPIRED or UNSAFE — we never trade those again, so
+// the approval cache row is stale forever. Returns the number of rows removed.
+export const deleteApprovalsForToken = (token) =>
+  db.prepare(`DELETE FROM approvals WHERE lower(token) = lower(?)`).run(token).changes;
+
 export const insertTrade = (row) =>
   db
     .prepare(
