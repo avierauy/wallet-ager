@@ -27,12 +27,15 @@ const AirlockMigrate = parseAbiItem(
   "event Migrate(address indexed asset, address indexed pool)"
 );
 
-// Doppler's anti-sniper hook is much more aggressive than Clanker's MEV module — the
-// default 66s polling window observed in production rarely catches a Doppler pool
-// becoming tradeable. Allow operators to extend (or shorten) the window without
-// touching code via DOPPLER_POLL_MAX_MS. Default 5min.
+// Doppler's anti-sniper hook is structurally more aggressive than Clanker's MEV module.
+// v13.3 extended the polling window to 5min hoping to catch more pools opening up — a
+// full session at that setting (~1.5h, 348 polls, 0 successful Doppler buys) showed the
+// extra wait does NOT improve success; the hook keeps the pool closed well past 5min in
+// nearly every case observed. Reverted to a 30s fail-fast default so we stop burning RPC
+// quota chasing pools that won't open. Still configurable via DOPPLER_POLL_MAX_MS for
+// experimentation; raise it back to 300_000 if a future hook update changes the picture.
 const DOPPLER_POLL_INTERVAL_MS = 5000;
-const DOPPLER_POLL_MAX_MS = Number(process.env.DOPPLER_POLL_MAX_MS ?? 300_000);
+const DOPPLER_POLL_MAX_MS = Number(process.env.DOPPLER_POLL_MAX_MS ?? 30_000);
 const DOPPLER_POLL_MAX_ATTEMPTS = Math.max(1, Math.ceil(DOPPLER_POLL_MAX_MS / DOPPLER_POLL_INTERVAL_MS));
 
 const ERC20_META_ABI = parseAbi([
