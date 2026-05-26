@@ -27,7 +27,7 @@ const UR_VERSION = UniversalRouterVersion.V2_1_1;
 const UNIVERSAL_ROUTER = "0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7";
 const PERMIT2 = "0x000000000022d473030f116ddee9f6b43ac78ba3";
 const WETH = "0x4200000000000000000000000000000000000006";
-const SLIPPAGE_BPS = 5000n; // 50% — accept basically anything for liquidation
+const SLIPPAGE_BPS = 9900n; // 99% — basically infinite, for stuck-position cleanup
 const FULL_DELTA_AMOUNT = 0n;
 
 const MAX_UINT160 = 2n ** 160n - 1n;

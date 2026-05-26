@@ -34,17 +34,42 @@ let reverted = 0;
 let notFound = 0;
 const failures = [];
 
+// Retry receipt fetch — Infura load-balanced nodes sometimes miss recent receipts on first
+// try. Fall back to getTransaction (which seems more reliable for confirming inclusion).
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fetchReceipt = async (hash) => {
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try { return await publicClient.getTransactionReceipt({ hash }); }
+    catch { if (attempt < 4) await sleep(500 * attempt); }
+  }
+  return null;
+};
+
+let processed = 0;
 for (const t of trades) {
-  try {
-    const r = await publicClient.getTransactionReceipt({ hash: t.txHash });
-    const status = r.status;
-    const marker = status === "success" ? "✓" : "✗ REVERTED";
-    console.log(`${marker}  ${t.side.padEnd(4)} ${t.token.padEnd(10)} ${t.walletId.padEnd(15)} gas=${r.gasUsed} ${t.txHash}`);
-    if (status === "success") success++;
+  processed++;
+  if (processed % 25 === 0) console.log(`[progress] ${processed}/${trades.length}`);
+  const r = await fetchReceipt(t.txHash);
+  if (r) {
+    const marker = r.status === "success" ? "✓" : "✗ REVERTED";
+    if (r.status === "success") success++;
     else { reverted++; failures.push(t); }
-  } catch (err) {
-    console.log(`?  ${t.side.padEnd(4)} ${t.token.padEnd(10)} ${t.walletId.padEnd(15)} ${t.txHash} (${err.message.slice(0,50)})`);
-    notFound++;
+    if (r.status !== "success") console.log(`${marker}  ${t.side.padEnd(4)} ${t.token.padEnd(10)} ${t.walletId.padEnd(15)} gas=${r.gasUsed} ${t.txHash}`);
+  } else {
+    // Receipt unavailable; check at least if tx was mined via getTransaction
+    try {
+      const tx = await publicClient.getTransaction({ hash: t.txHash });
+      if (tx.blockNumber) {
+        console.log(`? mined-but-no-receipt  ${t.side} ${t.token} ${t.walletId} block=${tx.blockNumber} ${t.txHash}`);
+        notFound++;
+      } else {
+        console.log(`? pending  ${t.side} ${t.token} ${t.walletId} ${t.txHash}`);
+        notFound++;
+      }
+    } catch {
+      console.log(`? tx-not-found  ${t.side} ${t.token} ${t.walletId} ${t.txHash}`);
+      notFound++;
+    }
   }
 }
 

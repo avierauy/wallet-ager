@@ -300,3 +300,74 @@ Verificación del swap real de Clanker en BaseScan (decodificación de sell real
 
 ### Pickup point
 Por cerrar: full suite + commit v13.14 + SilverBullet entries + push.
+
+---
+
+## Session 2026-05-26 madrugada — v13.16, v13.17, live cycle full 38 wallets, root cause hook anti-snipe
+
+### Worked on
+Tres bloques principales:
+1. **v13.16 — pre-simulation en Clanker aggregator**: validación en vivo de v13.14 reveló 100% revert rate en buys Clanker. Causa: API hardcoda slippage tight, precio se mueve entre quote/broadcast. Fix: `publicClient.call()` pre-flight ANTES del broadcast. Si reverte la sim, fallback a UR.
+2. **v13.17 — receipt-check universal**: audit del v13.16 cazó 1 false positive en 17 trades (5.9%) — un buy logueado como "completed" pero on-chain reverted. Causa: adapters no esperaban receipt post-broadcast. Fix: helper `submitAndConfirm` + typed error `OnChainRevert`, aplicado a TODOS los swap paths (clankerAggregator, uniswap/UR, directSwap, bankr, virtuals).
+3. **Live cycle full 38 wallets**: corrida de 90 min en mainnet, 172 buys ejecutados (100% cap diario), 149 sells matched. Cero false positives confirmados. Cascada de fallbacks operando: Clanker API → UR directSwap → AlphaRouter en 3 capas.
+
+### Completed
+
+**v13.16** (commit `4cb96c5`):
+- `src/adapters/clankerAggregator.js:simulateOrThrow` — eth_call con misma calldata que el broadcast. Si reverte, throw `clanker-api: simulation reverted (<reason>)` → dispatcher cae a UR.
+- 3 nuevos tests en `clankerAggregator.test.js` + 1 en `executor-clanker-routing.test.js`.
+- 278/278 tests.
+
+**v13.17** (commit `58e5622`):
+- `src/util/errors.js` — nueva typed error `OnChainRevert({ txHash, gasUsed, reason })`. Comentario explícito: NO es transient, withRetry no debe retryear.
+- `src/util/submitAndConfirm.js` (nuevo) — wrapper universal: broadcast + waitForReceipt 60s + throw OnChainRevert on `status: reverted`. Detecta sendTransaction vs writeContract por shape del tx.
+- 5 swap broadcast paths refactoreados para usar el helper: clankerAggregator, uniswap.submitRoute, directSwap.submitUR, bankr.submitZeroExSwap, virtuals.buyPreGrad/sellPreGrad.
+- Special handling clankerAggregator: re-throw OnChainRevert como `clanker-api:` para activar fallback UR (caso race sim-pass / chain-revert).
+- Special handling virtuals: catch OnChainRevert en executeBuyFlow → convert a SkipExecution (preserva "BondingV5 graduated → skip not fail").
+- Executor: nueva branch para OnChainRevert → status="reverted" en DB con txHash, daily cap NO consumido, Telegram notifica con prefix "on-chain revert:".
+- Aging-mode orchestrator: sell handoff a retry scheduler ahora triggea también con status="reverted".
+- 5 tests submitAndConfirm + 2 tests clankerAggregator (race scenario).
+- 285/285 tests passing.
+
+**Live validation cycle full** (38 wallets, 90 min):
+- 172 buys submitted (100% del cap diario × allowances)
+- 149 sells matched (1:1 con buys completed)
+- ~5 failed trades (cascadas completas exhaustas — Clanker→UR directSwap→AlphaRouter todas revertían)
+- 0 false positives "trade completed" (v13.17 fix verificado)
+- Cycle parcial: completó al hard cap de 90 min con 28/38 wallets at cap (74%), 90% de buys totales
+- Métricas observadas:
+  - 100% Clanker buys → fallback UR (Clanker API slippage no funciona para fresh launches)
+  - SELLS Clanker via Clanker API: 100% éxito (KyberSwap ~70%, 0x ~30%)
+  - Race sim-pass / chain-revert observado vías sniper sell (caught by OnChainRevert re-throw como clanker-api:)
+
+**Root cause hook anti-snipe time-based** (gran hallazgo de la sesión):
+- 3 tokens quedaron stuck post-daemon-stop: 2x EIKO, 1x TEST4 (todos Clanker, mismo hook `0xb429d62f8f3bFFb98CdB9569533eA23bF0Ba28CC`)
+- Daemon murió ~05:33 antes que el scheduled sell (delay 1-3min post buy 05:31) firme
+- sell-positions.js intentó liquidar ~05:34 → revert en UR / `no route found` en AlphaRouter
+- Inspección on-chain via `inspect-token-trade-history.js`: el pool NO es one-way (4 sells observadas), pero 0 sells via UR. Sells via ERC-4337 EntryPoint, OKX Dex Router, Clanker Factory. Comparativa con HUDAI (mismo hook, vendido OK via UR) demuestra que NO es token-template restriction.
+- Forensics con `simulate-stuck-sell.js`: a las ~07:00 (~1.5h después del buy) la SIMULACIÓN del mismo sell via UR **succeeded**. Hace 1h revertía. → confirma anti-snipe window time-based del hook.
+- Re-intento sells: 3/3 ✓ una vez que la ventana expiró. Cero positions stuck al final.
+
+**Scripts forensics nuevos** (reusables):
+- `scripts/find-stuck-positions.js` — focused (only tokens we bought) + parallel + progressive output. 2s vs 30+min de la versión anterior.
+- `scripts/liquidate-via-alpha-router.js` — fallback liquidator vía adapter uniswap (AlphaRouter handles V2/V3/V4).
+- `scripts/diagnose-stuck-token.js` — Quoter both directions, hook bytecode size, failed tx forensics.
+- `scripts/inspect-token-trade-history.js` — sells/buys ratio + router distribution per token.
+- `scripts/simulate-stuck-sell.js` — construye UR.execute calldata exacta + eth_call para revert reason.
+
+### Decisiones clave
+
+- **v13.16 pre-simulation**: gasta ~30ms eth_call por intento. Vale la pena: evita 100% de los gas-waste reverts on buys Clanker.
+- **v13.17 universal**: aplicado a TODOS los paths, no solo Clanker. Cost: 2-4s adicionales esperando receipt por swap. Beneficio: zero false positives, retry/fallback inteligente.
+- **NO DB wipes desde ahora**: cambio de política. Histórico de ciclos por wallet es operacionalmente útil (caps, cooldowns, approval cache, EXPIRED bookkeeping carrying forward).
+- **Root cause documentado**: Clanker hook `0xb429d62f...` tiene anti-snipe window time-based (~1h+). El sniper's sell delay (1-3 min) es **demasiado corto** para esto. Daemons que matamos antes que el retry naturally cleared the window pierden las posiciones temporalmente.
+
+### Rechazado / Pendiente para próxima sesión
+
+- **v13.18 (skip Clanker API en buys)**: NO se hace. El fallback UR existing maneja el caso correctamente. La rare casualidad de que un Clanker API quote pase la sim sigue valiendo intentar.
+- **Pending — ajustar sell delay para Clanker**: actualmente `sellDelayMin: [1, 3]` minutos. Para Clanker tokens debería ser [10, 30] min o más, para que la primera sell attempt caiga DESPUÉS de que el anti-snipe window cierre. Posible v13.18 alternativo.
+- **Pending — retry-with-backoff para sells**: la lógica actual (v13.5) reintenta 5 veces × 30s = 2.5 min de ventana de retry. Insuficiente para hook windows de ~1h. Considerar extender o hacer retry-while-daemon-alive con backoff exponencial.
+- **Pending — RPC inconsistencies en receipt fetching**: Infura load-balanced nodes a veces NO devuelven receipts incluso cuando getTransaction sí. Audit script needs retry + fallback (parcialmente implementado en este session).
+
+### Pickup point
+Daemon parado, sin zombies. **DB persistida** (no wipe per nueva política). Stuck positions: cero. Receipt audit corriendo background. Pendiente: commit v13.16 + v13.17 docs + SilverBullet update (commits ya pusheados al main pero MEMORY.md falta). Decisión técnica abierta: extender sell delay Clanker / retry-with-backoff.
