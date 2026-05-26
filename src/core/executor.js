@@ -1,4 +1,5 @@
 import * as bankr from "../adapters/bankr.js";
+import * as clankerAggregator from "../adapters/clankerAggregator.js";
 import * as uniswap from "../adapters/uniswap.js";
 import * as virtuals from "../adapters/virtuals.js";
 import { config } from "../config.js";
@@ -61,11 +62,53 @@ const quoteToLeg = (route, symbol, decimals) => {
   }
 };
 
+// Clanker-source tokens prefer the Clanker API route (byte-perfect fingerprint match with
+// the official UI flow; 1% integrator fee accepted in exchange). UR remains the fallback when
+// the API itself is unreachable — swap-level reverts propagate to the executor's withRetry.
+const isClankerSource = (source) => /^clanker-/.test(source ?? "");
+const isClankerApiError = (err) => String(err?.message ?? "").startsWith("clanker-api:");
+
 // dispatch — runs the adapter call and returns { txHash, in, out } where in/out are notification
 // legs with { symbol, decimals, amountWei }. `out` may be null when the adapter doesn't surface
 // an expected-output amount (e.g. Bankr/0x without parsing the quote payload).
 const dispatch = async ({ wallet, plan }) => {
   if (plan.dex === "uniswap") {
+    // Clanker-source path — try Clanker aggregator API first. On API failure, fall through
+    // to the UR path below; on swap-level failure (revert, nonce, etc.), re-throw and let
+    // the executor's withRetry layer decide.
+    if (isClankerSource(plan.token.source)) {
+      try {
+        if (plan.side === "buy") {
+          const r = await clankerAggregator.buyExactEthForToken({
+            wallet, tokenOut: plan.token, amountInWei: plan.amountInWei,
+          });
+          inc("clanker-aggregator", { outcome: "buy", provider: r.provider });
+          return {
+            txHash: r.txHash,
+            in: ETH_LEG(plan.amountInWei),
+            out: quoteToLeg(r.route, plan.token.symbol, plan.token.decimals),
+          };
+        }
+        const r = await clankerAggregator.sellExactTokenForEth({
+          wallet, tokenIn: plan.token, amountInWei: plan.amountInWei,
+        });
+        inc("clanker-aggregator", { outcome: "sell", provider: r.provider });
+        return {
+          txHash: r.txHash,
+          in: TOKEN_LEG(plan.token, plan.amountInWei),
+          out: quoteToLeg(r.route, "ETH", 18),
+        };
+      } catch (err) {
+        if (!isClankerApiError(err)) throw err;
+        logger.warn(
+          { walletId: wallet.id, token: plan.token.symbol, side: plan.side, err: err.message },
+          "clanker-aggregator: API failed — falling back to Universal Router path"
+        );
+        inc("clanker-aggregator", { outcome: "fallback-ur" });
+        // fall through to the UR path below
+      }
+    }
+
     if (plan.side === "buy") {
       const r = await uniswap.buyExactEthForToken({
         account: wallet.account,
