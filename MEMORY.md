@@ -371,3 +371,77 @@ Tres bloques principales:
 
 ### Pickup point
 Daemon parado, sin zombies. **DB persistida** (no wipe per nueva política). Stuck positions: cero. Receipt audit corriendo background. Pendiente: commit v13.16 + v13.17 docs + SilverBullet update (commits ya pusheados al main pero MEMORY.md falta). Decisión técnica abierta: extender sell delay Clanker / retry-with-backoff.
+
+---
+
+## Session 2026-05-26 mañana — v13.18 pre-sim universal + Clanker retry window + forensic correction
+
+### Worked on
+Tres tareas encadenadas a partir de la decisión de "no v13.18 skip-Clanker-buy" y la pregunta del usuario sobre por qué EIKO/TEST4 quedaron stuck:
+1. **Pre-sim sells universal**: applicar el patrón v13.16 (eth_call antes de broadcast) a TODOS los swap paths para evitar gas waste en reverts.
+2. **Sniper retry window per-source**: Clanker sells exhausted el retry default (5×30s=2.5min) demasiado rápido. Per-source override.
+3. **Forensic tracker pasivo**: standalone script que computa el hook window real desde DB.
+
+### Completed (commit `44158d7`)
+
+**v13.18-A: pre-sim universal**:
+- `src/util/errors.js`: nuevo `PreSimulationRevert({ reason, target })`. Distinct de OnChainRevert (este NO se broadcast, no se gasta gas).
+- `src/util/simulateBeforeBroadcast.js` (NUEVO): wrapper de `publicClient.call`. On revert, throw PreSimulationRevert. 4 tests.
+- Aplicado a: `uniswap.submitRoute`, `directSwap.submitUR`, `bankr.submitZeroExSwap`, `virtuals.buyPreGrad/sellPreGrad`. clankerAggregator ya tenía `simulateOrThrow` inline (preserva special prefix `clanker-api:` para fallback) — left as-is.
+- Virtuals: catch incluye PreSimulationRevert junto a OnChainRevert → SkipExecution.
+
+**v13.18-B: executor + orchestrator handling**:
+- Executor catches PreSimulationRevert → status `pre-sim-reverted` en DB, no Telegram noise, daily cap NO consumido.
+- Aging orchestrator: sell handoff a sniper retry scheduler triggea también con `pre-sim-reverted`.
+- Executor escribe `trades.confirmed_at = Date.now()` al confirmar tx exitosa. La columna existía en schema desde v1 pero nunca se escribía. Pre-v13.18 trades quedan con `null`; tracker maneja ambos casos.
+
+**v13.18-C: per-source retry config**:
+- `src/orchestrator/sniper.js`: nuevo `retryConfigForToken(token)` que routea por `source`.
+- Clanker tokens: `SNIPER_CLANKER_SELL_RETRY_INTERVAL_MS=60000` (1min), `SNIPER_CLANKER_SELL_MAX_ATTEMPTS=10` → **10 min total retry window**.
+- Non-Clanker: default unchanged (5×30s=2.5min).
+
+**v13.18-D: forensic tracker** (`scripts/clanker-window-tracker.js`):
+- Standalone read-only. Lee discovered_tokens + trades. Para cada Clanker token que tradeamos: compute `first_sell_OK_time - discovered_at`.
+- Output: per-token table + distribution (min/P50/P90/P99/max) + recommended retry config.
+
+### Hallazgo grande — corrección del modelo previo
+
+**El forensic me contradijo**. Mi narrativa previa (en este MEMORY y en SilverBullet decisions/2026-05-26-clanker-hook-antisnipe-window) decía "hook anti-snipe window ~30-90 min". **Eso estaba mal**.
+
+Data real del cycle 2026-05-26 (n=93 Clanker tokens que tradeamos):
+- **min: 73s (1.2 min)**
+- **P50: 124s (2.1 min)**
+- **P90: 166s (2.8 min)**
+- **P99: 183s (3.0 min)**
+- **max: 190s (3.2 min)**
+
+**El hook window típico es 1-3 min, no horas.** 99% de los Clanker tokens cleareare su window dentro de 3 minutos. Lo que vimos con EIKO/TEST4 (3 min después del buy → fail; 1.5h después → OK) son **outliers** del 1%, no el caso típico.
+
+Implicaciones:
+- v13.18 retry config calibrada contra esta data real (no contra mi sobre-estimación previa)
+- Defaults 10×1min = 10min cubren P99 con 3× headroom
+- Causa real del stuck de EIKO/TEST4 sigue siendo el daemon-killed scenario (murió a los ~2min post-buy, antes que el primer sell scheduled se disparara)
+- Si el daemon hubiera vivido 5-10 min más, la retry loop default probablemente los habría agarrado dentro del window normal
+
+**Decisión documentada en [[decisions/2026-05-26-clanker-hook-antisnipe-window]]** que fue escrita ANTES de tener forensic data, así que tiene la sobre-estimación. La data corregida queda en este MEMORY entry + el commit message de v13.18. No reescribo el decisions/ file viejo — queda como registro histórico de cómo evolutionó nuestro entendimiento; el siguiente decisions/ file (si surge otro hallazgo) puede referirlo con `superseded-by:` per la convención SilverBullet.
+
+### Decisiones clave
+
+- **Pre-sim universal aplicado pero clankerAggregator NO refactorizado** para mantener su semántica `clanker-api:` prefix (que el dispatcher usa para fallback a UR). Refactor cosmético posponed.
+- **Sniper Clanker retry: 10min total** (vs 60min de mi propuesta inicial). Calibrado contra P99 + headroom, no over-engineering.
+- **Tests 289/289** después de los cambios. Baseline 285 v13.17 + 4 nuevos pre-sim helper.
+
+### Pickup point para próxima sesión
+
+Repo limpio, todo pusheado al main:
+- `4cb96c5` v13.16 (pre-sim Clanker buys)
+- `58e5622` v13.17 (receipt-check universal)
+- `fe4a6c1` docs session previo + scripts forensics
+- `44158d7` v13.18 (pre-sim universal + retry window + tracker)
+
+DB persistida con histórico del cycle 2026-05-26 (172 buys + 149 sells + reverted/failed + EXPIRED). Próxima corrida del daemon va a mostrar:
+- `pre-sim-reverted` status en trades cuando hook windows bloqueen
+- Clanker sells retryeando 10× en 10min antes de exhaust
+- `confirmed_at` poblado en todos los trades nuevos (forensics más confiables)
+
+Cuando juntemos data de varios cycles, re-correr `clanker-window-tracker.js` afinará el P99 — si vemos windows >3min consistentemente, subir `SNIPER_CLANKER_SELL_RETRY_INTERVAL_MS` o `SNIPER_CLANKER_SELL_MAX_ATTEMPTS`.
