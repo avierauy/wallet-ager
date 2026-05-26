@@ -5,7 +5,7 @@ import * as virtuals from "../adapters/virtuals.js";
 import { config } from "../config.js";
 import { notifyApproval, notifyError, notifyTrade } from "../notify/telegram.js";
 import { checkBeforeSell, checkBondingCurve, checkToken } from "../safety/index.js";
-import { OnChainRevert, SkipExecution } from "../util/errors.js";
+import { OnChainRevert, PreSimulationRevert, SkipExecution } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { inc } from "../util/metrics.js";
 import { withRetry } from "../util/retry.js";
@@ -279,7 +279,14 @@ export const executeAction = async ({ wallet, plan }) => {
         },
       })
     );
-    updateTrade(tradeId, { status: "submitted", tx_hash: dispatched.txHash });
+    // v13.18: set confirmed_at on successful broadcasts. Was always null pre-v13.18 because
+    // the schema field was declared but never written; the forensic tracker uses this to
+    // compute pool-age-at-confirmation deltas without re-fetching receipts.
+    updateTrade(tradeId, {
+      status: "submitted",
+      tx_hash: dispatched.txHash,
+      confirmed_at: Date.now(),
+    });
     inc("trade", { status: "submitted", dex: plan.dex, side: plan.side });
     // No-op for static tokens; bumps last_traded_at for discovered ones so the sweeper
     // doesn't TTL-evict them while they're actively being cycled.
@@ -353,6 +360,21 @@ export const executeAction = async ({ wallet, plan }) => {
         });
       }
       return { status: "reverted", error: err.message, txHash: err.txHash };
+    }
+    // v13.18: pre-simulation revert (eth_call rejected before broadcast). No gas spent.
+    // Treated similarly to OnChainRevert for retry/cap purposes — sniper retry will see
+    // status='pre-sim-reverted' as non-terminal and reschedule. Daily cap not consumed.
+    if (err instanceof PreSimulationRevert) {
+      updateTrade(tradeId, { status: "pre-sim-reverted", error: err.message });
+      inc("trade", { status: "pre-sim-reverted", dex: plan.dex, side: plan.side });
+      logger.warn(
+        { walletId: wallet.id, walletAddress: wallet.account.address,
+          dex: plan.dex, side: plan.side, target: err.target, reason: err.reason },
+        "execution rejected pre-broadcast (sim revert)"
+      );
+      // Silent on Telegram — these are expected during Clanker hook windows; the sniper's
+      // retry loop will handle them. Operator only gets notified once retries are exhausted.
+      return { status: "pre-sim-reverted", error: err.message };
     }
     updateTrade(tradeId, { status: "failed", error: err.message });
     inc("trade", { status: "failed", dex: plan.dex, side: plan.side });

@@ -24,6 +24,7 @@ import { encodeFunctionData, erc20Abi, maxUint256, parseAbi } from "viem";
 import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
 import { quoteV4Pool } from "../discovery/v4PoolKey.js";
+import { simulateBeforeBroadcast } from "../util/simulateBeforeBroadcast.js";
 import { submitAndConfirm } from "../util/submitAndConfirm.js";
 
 const require = createRequire(import.meta.url);
@@ -114,7 +115,14 @@ const buildExecuteCalldata = (planner, deadline) =>
 
 const submitUR = async ({ account, calldata, value }) => {
   const wallet = walletClientFor(account);
-  // v13.17: wait + verify receipt. Reverts throw OnChainRevert.
+  // v13.18: pre-simulate before broadcast. Catches Clanker hook anti-snipe window blocks
+  // and similar structural reverts without burning gas. Throws PreSimulationRevert which
+  // propagates to executor (status 'pre-sim-reverted') and the sniper retry queue.
+  await simulateBeforeBroadcast({
+    publicClient, account,
+    tx: { to: config.chain.dexes.uniswap.universalRouter, data: calldata, value },
+  });
+  // v13.17: wait + verify receipt. Post-broadcast reverts throw OnChainRevert.
   const { hash } = await submitAndConfirm({
     publicClient,
     walletClient: wallet,

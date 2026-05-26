@@ -65,11 +65,14 @@ export const runOneTick = async ({ wallet, rng, tokens }) => {
     recordTrade({ wallet, rng });
   }
   // Aging-mode sell that didn't broadcast (failed: RPC/network) OR broadcast and reverted
-  // (reverted: slippage, hook block) → hand off to the sniper's retry scheduler so the
-  // position doesn't sit until the next aging tick (minutes-to-hours away). Sells never
-  // consume daily slots so we can keep retrying without affecting the cap. The retry
-  // applies a slippage bump (v13.5) which often clears revert causes.
-  if (plan.side === "sell" && (result.status === "failed" || result.status === "reverted")) {
+  // (reverted: slippage, hook block) OR rejected pre-broadcast (pre-sim-reverted: hook
+  // window) → hand off to the sniper's retry scheduler so the position doesn't sit until
+  // the next aging tick (minutes-to-hours away). Sells never consume daily slots so we
+  // can keep retrying without affecting the cap. The retry applies a slippage bump (v13.5)
+  // which often clears slippage-style reverts; structural reverts (hook windows) only
+  // clear with time and the v13.18 per-source retry window.
+  if (plan.side === "sell"
+      && (result.status === "failed" || result.status === "reverted" || result.status === "pre-sim-reverted")) {
     const sniper = wallet.profile.sniper ?? {};
     logger.info(
       { walletId: wallet.id, token: plan.token.symbol },

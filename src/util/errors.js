@@ -29,3 +29,19 @@ export class OnChainRevert extends Error {
     this.reason = reason ?? null;
   }
 }
+
+// PreSimulationRevert: thrown by adapters when an eth_call simulation (before broadcast)
+// reverts. We didn't broadcast — no gas wasted. Distinct from OnChainRevert (which happens
+// post-broadcast) so audit/forensics can tell them apart.
+//
+// Use case: Clanker hook anti-snipe window blocks sells via UR. Pre-simulation catches it
+// before we broadcast. Executor treats this similarly to OnChainRevert (no daily cap
+// consumption, sniper retry triggers) but reports separate `pre-sim-reverted` status.
+export class PreSimulationRevert extends Error {
+  constructor({ reason, target }) {
+    super(`pre-simulation reverted${target ? ` (target=${target})` : ""}${reason ? `: ${reason}` : ""}`);
+    this.name = "PreSimulationRevert";
+    this.reason = reason ?? null;
+    this.target = target ?? null;
+  }
+}

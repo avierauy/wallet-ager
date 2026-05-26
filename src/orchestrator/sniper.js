@@ -262,8 +262,25 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
 // total tries (~2.5 min total with the defaults). Hook-blocked sells often clear on the
 // next block or two — instead of waiting for aging mode to randomly pick up the position,
 // we keep retrying within the sniper's own scheduler.
+//
+// v13.18: Clanker tokens use the per-source overrides. The Clanker MEV hook
+// (0xb429d62f...) has a time-based anti-snipe window that blocks Universal Router sells.
+// Forensic data from cycle 2026-05-26 (n=93 tokens): P50 first-sell-OK at 2.1 min from
+// discovery, P99 at 3.0 min. The default 5×30s window (2.5 min) covers the median but
+// not the tail — Clanker config below extends to 10 min total (10 attempts × 1 min),
+// which covers P99 with ~3× headroom. Outlier cases (>10 min windows) still need
+// manual recovery; they're rare per the data.
 const RETRY_INTERVAL_MS = 30_000;
 const MAX_SELL_ATTEMPTS = 5;
+const CLANKER_RETRY_INTERVAL_MS = Number(process.env.SNIPER_CLANKER_SELL_RETRY_INTERVAL_MS ?? 60_000); // 1 min
+const CLANKER_MAX_SELL_ATTEMPTS = Number(process.env.SNIPER_CLANKER_SELL_MAX_ATTEMPTS ?? 10);
+
+const retryConfigForToken = (token) => {
+  if (/^clanker-/.test(token.source ?? "")) {
+    return { intervalMs: CLANKER_RETRY_INTERVAL_MS, maxAttempts: CLANKER_MAX_SELL_ATTEMPTS };
+  }
+  return { intervalMs: RETRY_INTERVAL_MS, maxAttempts: MAX_SELL_ATTEMPTS };
+};
 
 // Pure: compute the slippage tolerance for the Nth attempt. attempt is 1-indexed.
 // Exported for unit tests; production callers use it inside scheduleSell.
@@ -332,18 +349,21 @@ export const scheduleSell = ({ wallet, token, delayMs, sniper, attempt = 1 }) =>
       // dry-run are terminal: nothing changes by retrying.
       const succeeded = result?.status === "submitted" || result?.status === "dry-run";
       const terminal = succeeded || result?.status === "skipped";
-      if (!terminal && attempt < MAX_SELL_ATTEMPTS) {
+      // v13.18: per-source retry config — Clanker tokens get a longer window to outlast the
+      // hook anti-snipe block.
+      const retryCfg = retryConfigForToken(token);
+      if (!terminal && attempt < retryCfg.maxAttempts) {
         logger.info(
           { walletId: wallet.id, token: token.symbol, attempt, nextAttempt: attempt + 1,
-            nextDelayMs: RETRY_INTERVAL_MS },
+            nextDelayMs: retryCfg.intervalMs, maxAttempts: retryCfg.maxAttempts },
           "sniper: sell failed — scheduling retry"
         );
         inc("sniper", { outcome: "sell-retry" });
-        scheduleSell({ wallet, token, delayMs: RETRY_INTERVAL_MS, sniper, attempt: attempt + 1 });
+        scheduleSell({ wallet, token, delayMs: retryCfg.intervalMs, sniper, attempt: attempt + 1 });
       } else if (!terminal) {
         logger.warn(
           { walletId: wallet.id, walletAddress: wallet.account.address,
-            token: token.symbol, attempts: attempt },
+            token: token.symbol, attempts: attempt, maxAttempts: retryCfg.maxAttempts },
           "sniper: sell exhausted retries — leaving position for aging mode"
         );
         inc("sniper", { outcome: "sell-exhausted" });
@@ -363,8 +383,9 @@ export const scheduleSell = ({ wallet, token, delayMs, sniper, attempt = 1 }) =>
         "sniper: scheduled sell failed"
       );
       inc("sniper", { outcome: "sell-error" });
-      if (attempt < MAX_SELL_ATTEMPTS) {
-        scheduleSell({ wallet, token, delayMs: RETRY_INTERVAL_MS, sniper, attempt: attempt + 1 });
+      const retryCfg = retryConfigForToken(token);
+      if (attempt < retryCfg.maxAttempts) {
+        scheduleSell({ wallet, token, delayMs: retryCfg.intervalMs, sniper, attempt: attempt + 1 });
       } else {
         notifyError({
           walletId: wallet.id,

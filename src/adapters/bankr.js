@@ -1,6 +1,7 @@
 import { erc20Abi, isAddressEqual } from "viem";
 import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
+import { simulateBeforeBroadcast } from "../util/simulateBeforeBroadcast.js";
 import { submitAndConfirm } from "../util/submitAndConfirm.js";
 
 // 0x AllowanceHolder exposes only `execute` — we don't need to encode it ourselves.
@@ -52,17 +53,16 @@ export const ensureAllowance = async ({ account, token, spender, amount }) => {
 
 export const submitZeroExSwap = async ({ account, quote }) => {
   const wallet = walletClientFor(account);
-  // v13.17: wait + verify receipt. Reverts throw OnChainRevert.
-  const { hash } = await submitAndConfirm({
-    publicClient,
-    walletClient: wallet,
-    tx: {
-      to: quote.transaction.to,
-      data: quote.transaction.data,
-      value: BigInt(quote.transaction.value ?? "0"),
-      gas: quote.transaction.gas ? BigInt(quote.transaction.gas) : undefined,
-    },
-  });
+  const tx = {
+    to: quote.transaction.to,
+    data: quote.transaction.data,
+    value: BigInt(quote.transaction.value ?? "0"),
+    gas: quote.transaction.gas ? BigInt(quote.transaction.gas) : undefined,
+  };
+  // v13.18: pre-simulate to catch any structural revert before broadcast.
+  await simulateBeforeBroadcast({ publicClient, account, tx });
+  // v13.17: wait + verify receipt.
+  const { hash } = await submitAndConfirm({ publicClient, walletClient: wallet, tx });
   return hash;
 };
 

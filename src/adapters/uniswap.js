@@ -7,6 +7,7 @@ import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
 import { ethersProvider } from "../util/ethersProvider.js";
 import { signPermitSingle } from "../util/permit2.js";
+import { simulateBeforeBroadcast } from "../util/simulateBeforeBroadcast.js";
 import { submitAndConfirm } from "../util/submitAndConfirm.js";
 import { buyDirect, isDirectSwappable, isSellDirectSwappable, sellDirect } from "./directSwap.js";
 import { logger } from "../util/logger.js";
@@ -98,8 +99,14 @@ export const approveTokenToPermit2 = async ({ account, token }) => {
 const submitRoute = async ({ account, route }) => {
   const wallet = walletClientFor(account);
   const { to, calldata, value } = route.methodParameters;
-  // v13.17: wait for receipt + verify status. On-chain reverts (slippage exceeded,
-  // hook block, etc.) throw OnChainRevert which propagates up to the executor.
+  // v13.18: pre-simulate to catch hook blocks / structural reverts before broadcasting.
+  // Throws PreSimulationRevert if it would revert. Caller (sniper retry path) reschedules.
+  await simulateBeforeBroadcast({
+    publicClient, account,
+    tx: { to, data: calldata, value: BigInt(value) },
+  });
+  // v13.17: wait for receipt + verify status. On-chain reverts (race past pre-sim) throw
+  // OnChainRevert which propagates up to the executor.
   const { hash } = await submitAndConfirm({
     publicClient,
     walletClient: wallet,
