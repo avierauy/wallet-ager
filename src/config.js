@@ -91,22 +91,12 @@ export const config = {
     provider: optional("SAFETY_PROVIDER", "simulation"),
   },
   // Sniper fanout — when a fresh launch is discovered, N random eligible wallets snipe it,
-  // each fired after a random delay in [staggerMin, staggerMax] ms. Defaults preserve the
-  // pre-v13.13 behavior (1 wallet, immediate). Configurable per-source so Clanker vs Doppler
-  // vs Virtuals can be tuned independently (different MEV windows, different risk profiles).
-  // `uniswap` covers generic Uniswap discoveries (non-launchpad) and static tokens.
+  // each fired after a random delay in [staggerMin, staggerMax] ms. Universal across all
+  // discovery sources (Clanker / Doppler / Virtuals / generic Uniswap) — per-wallet cooldown
+  // (sniperState) already prevents cross-source overlap. Defaults preserve pre-v13.13 behavior
+  // (1 wallet, immediate fire). v13.15: replaced 8 per-source env vars with a single pair.
   sniper: {
-    fanoutBySource: {
-      clanker:  positiveInt(optional("SNIPER_FANOUT_CLANKER",  "1"), "SNIPER_FANOUT_CLANKER"),
-      doppler:  positiveInt(optional("SNIPER_FANOUT_DOPPLER",  "1"), "SNIPER_FANOUT_DOPPLER"),
-      virtuals: positiveInt(optional("SNIPER_FANOUT_VIRTUALS", "1"), "SNIPER_FANOUT_VIRTUALS"),
-      uniswap:  positiveInt(optional("SNIPER_FANOUT_UNISWAP",  "1"), "SNIPER_FANOUT_UNISWAP"),
-    },
-    staggerMsBySource: {
-      clanker:  parseStaggerRange(optional("SNIPER_FANOUT_CLANKER_STAGGER_MS",  "0-0"), "SNIPER_FANOUT_CLANKER_STAGGER_MS"),
-      doppler:  parseStaggerRange(optional("SNIPER_FANOUT_DOPPLER_STAGGER_MS",  "0-0"), "SNIPER_FANOUT_DOPPLER_STAGGER_MS"),
-      virtuals: parseStaggerRange(optional("SNIPER_FANOUT_VIRTUALS_STAGGER_MS", "0-0"), "SNIPER_FANOUT_VIRTUALS_STAGGER_MS"),
-      uniswap:  parseStaggerRange(optional("SNIPER_FANOUT_UNISWAP_STAGGER_MS",  "0-0"), "SNIPER_FANOUT_UNISWAP_STAGGER_MS"),
-    },
+    fanout:    positiveInt(optional("SNIPER_FANOUT", "1"), "SNIPER_FANOUT"),
+    staggerMs: parseStaggerRange(optional("SNIPER_FANOUT_STAGGER_MS", "0-0"), "SNIPER_FANOUT_STAGGER_MS"),
   },
 };

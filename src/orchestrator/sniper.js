@@ -115,16 +115,6 @@ const pickWalletsRandom = (rng, n) => {
   return shuffled.slice(0, Math.min(n, shuffled.length));
 };
 
-// Map a token's `source` (e.g. "clanker-v4", "doppler-bankr", "virtuals-Launched", "uniswap-v3")
-// to the matching fanout config key. Unknown / missing sources fall through to "uniswap".
-const sourceToFanoutKey = (source) => {
-  if (!source) return "uniswap";
-  if (/^clanker-/.test(source)) return "clanker";
-  if (/^doppler-/.test(source)) return "doppler";
-  if (/^virtuals-/.test(source)) return "virtuals";
-  return "uniswap";
-};
-
 const computeStaggerDelay = ([minMs, maxMs], rng) => {
   if (minMs === 0 && maxMs === 0) return 0;
   if (minMs === maxMs) return minMs;
@@ -195,10 +185,11 @@ const fireOneSniperBuy = async ({ wallet, token, rng }) => {
   }
 };
 
-// Public entry — fire-and-forget from the discovery handlers. Reads fanout + stagger from
-// config based on the token's source; picks N random eligible wallets; reserves slot+cooldown
-// for all N immediately at pick time (so a concurrent discovery cannot re-pick them); then
-// fires each one with a random stagger delay.
+// Public entry — fire-and-forget from the discovery handlers. Reads universal fanout + stagger
+// from config (v13.15: dropped per-source breakdown — cooldown already prevents cross-source
+// wallet overlap). Picks N random eligible wallets; reserves slot+cooldown for all N
+// immediately at pick time (so a concurrent discovery cannot re-pick them); then fires each
+// one with a random stagger delay.
 //
 // Backwards-compat path: when fanout=1 AND stagger is [0,0] (the defaults), fires the single
 // wallet synchronously and returns { fired, walletId, result } exactly like pre-v13.13.
@@ -215,9 +206,8 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
     return { skipped: "paused" };
   }
 
-  const fanoutKey = sourceToFanoutKey(token.source);
-  const fanoutN = config.sniper.fanoutBySource[fanoutKey];
-  const staggerRange = config.sniper.staggerMsBySource[fanoutKey];
+  const fanoutN = config.sniper.fanout;
+  const staggerRange = config.sniper.staggerMs;
 
   const wallets = pickWalletsRandom(rng, fanoutN);
   if (wallets.length === 0) {
@@ -261,7 +251,7 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
   }
   inc("sniper", { outcome: "fanout-scheduled" });
   logger.info(
-    { token: token.symbol, source: token.source, fanoutKey, fanoutN: wallets.length,
+    { token: token.symbol, source: token.source, fanoutN: wallets.length,
       walletIds: wallets.map((w) => w.id), staggerRange },
     "sniper: fanout scheduled"
   );

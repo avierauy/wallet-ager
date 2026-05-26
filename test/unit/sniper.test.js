@@ -1,14 +1,21 @@
 import { describe, test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import {
+
+// Force fanout defaults so tests are isolated from whatever .env has (production-tuned
+// values would otherwise leak via dotenv/config inside src/config.js). Tests in this file
+// assume single-wallet immediate-fire behavior (the v13.13/v13.15 backwards-compat path).
+process.env.SNIPER_FANOUT = "1";
+process.env.SNIPER_FANOUT_STAGGER_MS = "0-0";
+
+const {
   _resetDeps,
   _setDeps,
   _stopAll,
   effectiveSellSlippageBps,
   initSniper,
   tryFireSniperBuy,
-} from "../../src/orchestrator/sniper.js";
-import { _resetAll as resetDailyCounter } from "../../src/strategy/dailyCounter.js";
+} = await import("../../src/orchestrator/sniper.js");
+const { _resetAll: resetDailyCounter } = await import("../../src/strategy/dailyCounter.js");
 
 const TOKEN = {
   address: "0xa4a2e2ca3fbfe21aed83471d28b6f65a233c6e00",
