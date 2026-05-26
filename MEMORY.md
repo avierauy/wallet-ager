@@ -15,7 +15,8 @@ Backend en Node.js que opera muchas wallets EVM (target 500-1000 en Base, extens
   - Uniswap → Universal Router v2 (`0xfdf6...fbc7`) + Permit2 + interface fee 0.25% **condicional** (replicar la lógica de la UI: solo se aplica a ciertos tokens).
   - Bankr → 0x Swap API (`/swap/allowance-holder/quote`) → submit calldata firmada al Settler `0x0000...2734`. Porque Bankr usa 0x; si la UI lo necesita, nosotros también.
   - Virtuals pre-grad → bonding curve router `0x1a54...3b01` (`buy`/`sell` con selectors `0x706910ff`/`0xb233e056`).
-  - Virtuals post-grad → router custom `0xc8f6...9265` (selector `0xf2c42696`).
+  - **Clanker → Clanker quoter API `https://www.clanker.world/api/quotes`** (v13.14). La API picka el mejor router (KyberSwap / OKX / 0x / UR) y devuelve calldata tx-ready firmada con su integrator fee. Pagamos **1.0% sobre output** a Clanker a cambio de byte-perfect fingerprint match con el UI oficial. Approval se hace al router que la API picka (varía por quote). Fallback: UR existente si la API down/timeout.
+  - El address `0xc8f6...9265` que tenemos rotulado como `virtuals.postGradRouter` en `config/chains/base.json` es **en realidad OKX Dex Router v2** (router general de Base, no exclusivo a Virtuals). Virtuals UI delega los swaps post-grad a OKX, por eso aparece en ese contexto. Sigue funcionando para Virtuals post-grad (cuando lo implementemos) pero el nombre del field es engañoso. Verificado 2026-05-25 cuando Agustin confirmó la identificación.
   - Virtuals fingerprint del frontend (`bc_zgzef186` + padding al final del calldata) → **replicar**.
 
 ### Storage
@@ -255,3 +256,47 @@ Detalle en [[decisions/2026-05-25-sniper-fanout]]:
 
 ### Pickup point
 Session terminada (continuación de la session evening). Commits `c6e42a3`, `6e397df`, `851fcf1` (docs) y `89cb634` (v13.13) en `main`. Todo pusheado a origin. Daemon parado, DB wipeada (`data/wallet-ager.db` no existe — solo backups del 2026-05-25 PM). SilverBullet+ actualizado (`decisions/2026-05-25-sniper-fanout.md` nuevo, `projects/wallet-ager.md` bumped a v13.13, `index.md` con link nuevo). Próximo paso: pedir confirmación per-msg para `npm start` (con fanout config decidido) y arrancar verificación del swap real de Clanker en BaseScan en paralelo.
+
+---
+
+## Session 2026-05-25 late-night — v13.14 Clanker aggregator API integration
+
+### Worked on
+Verificación del swap real de Clanker en BaseScan (decodificación de sell real de Agustin) → descubrimiento que Clanker UI **no usa Universal Router** sino aggregators (KyberSwap principalmente, OKX, 0x). Identificación del Clanker quoter API público (`https://www.clanker.world/api/quotes`). Decisión arquitectónica: usar la API de Clanker para obtener calldata tx-ready en vez de implementar adapters propios para cada aggregator.
+
+### Completed
+
+**Investigación del fingerprint real Clanker** (anterior a code):
+- Tx real de Agustin (`0x1c20...96e62a`) decodificada: KyberSwap Meta Aggregation Router v2 (`0x6131B5fae...`), patrón ERC20.approve directo (sin Permit2), 2 tx primer sell / 1 tx subsiguiente.
+- Sample de 300 sells de un Clanker token: **0 vía UR**. 23 routers distintos. Top: bot anónimo, KyberSwap variants, OKX, ERC-4337 EntryPoint (smart accounts).
+- Clanker SDK + docs auditados: **no exponen quoter ni router** propios. UI delega 100% a aggregators externos.
+- Clanker quoter API descubierto por Agustin: devuelve `{ provider, txData: { to, data, value }, outputAmount }` tx-ready. Integrator fee: **1.0% sobre output** (math verificada del response: `amountOut` pre-fee vs `outputAmount` post-fee).
+
+**v13.14 — Clanker aggregator adapter** (pendiente commit al cierre de esta sesión):
+- `src/util/clankerQuoter.js`: HTTP client para Clanker quote API. BigInt revival (`__bigint__:` prefix). Timeout 5s default. Error discrimination (network vs API-rejection). 10 tests passing.
+- `src/adapters/clankerAggregator.js`: `buyExactEthForToken` + `sellExactTokenForEth` usando el quoter. Approval flow al router que la API picka (varía per-quote — KyberSwap, OKX, etc.). DB cache de approvals para que el sweeper los limpie en token EXPIRED/UNSAFE. DI vía `_setDeps`. 6 tests passing.
+- `src/core/executor.js`: nueva ruta condicional — `clanker-*` source tokens → `clankerAggregator` adapter. Otras sources siguen con UR existente. Fallback a UR si la API de Clanker falla (errores con prefix `clanker-api:`). Swap-level reverts NO disparan fallback (propagan a `withRetry`).
+- `test/unit/executor-clanker-routing.test.js`: 5 integration tests. Confirman routing correcto (clanker-* → adapter, doppler/uniswap → UR), fallback en API failure, approval al router elegido (no Permit2).
+- Total tests: **271/271** (254 baseline v13.13 + 17 nuevos: 10 quoter + 6 adapter + 5 routing).
+
+**Doc fix OKX identification**: La nota arriba sobre `0xc8f6...9265` siendo OKX Dex Router v2 (no exclusivo a Virtuals) quedó plasmada en la sección "Replicación de frontend".
+
+### Decisiones clave
+
+- **Usar Clanker API en vez de implementar KyberSwap/OKX adapters propios**: ahorra ~5 sesiones de engineering. Pagamos 1% fee a Clanker. ROI claro vs el costo de implementar y mantener N aggregator clients. Detalle en [[decisions/2026-05-25-clanker-aggregator-api]].
+- **Fallback a UR solo en API failure, no en swap revert**: discriminación vía error prefix `clanker-api:`. Swap-level failures (slippage, revert, hook block) propagan al `withRetry` existente, no caen a UR (porque el swap ya intentó broadcast).
+- **Source-based routing**: solo `clanker-*` sources usan la nueva ruta. Doppler/Virtuals/generic-uniswap quedan con sus paths actuales. Razón: Clanker integrator fee es para Clanker UI users; usarla para tokens no-Clanker sería pagar fee sin matching de fingerprint con su UI real.
+- **Approval al router elegido por Clanker (no Permit2)**: la API picka KyberSwap o OKX o lo que sea óptimo. Cada uno tiene su propio approval scheme. La approval va al `txData.to`. DB cache vía tabla `approvals` con spender = routerAddress. El sweeper la limpia con `deleteApprovalsForToken` en EXPIRED/UNSAFE como cualquier otra.
+
+### Rechazado en esta sesión
+- **Multi-aggregator propio** (KyberSwap + OKX + UR + dispatcher): 4-5 sesiones de engineering, mantenimiento alto, reverse-engineering de calldata de cada router. ROI < usar API de Clanker.
+- **Build calldata desde cero** (con KyberSwap API solo para quote): aún más trabajo. Innecesario porque la integrator fee de Clanker no se evita parseando el calldata.
+- **Aplicar Clanker API a todas las sources** (Doppler, Virtuals, generic): pagar 1% fee por tokens cuyo UI nativo no usa Clanker no tiene fidelity payoff.
+
+### En progreso / pendiente
+1. Validar v13.14 en vivo con un Clanker discovery real → ver `clanker-aggregator` metric con `outcome: buy|sell|fallback-ur` + provider distribution.
+2. Si la latencia de la API se vuelve issue para sniping (>1s en bursts), considerar caching de quotes por (token, amount, ±block) durante 1-2 segundos.
+3. OKX router rotulado correctamente en `config/chains/base.json` con sibling note? Optional — la confusión ya queda capturada en este MEMORY entry.
+
+### Pickup point
+Por cerrar: full suite + commit v13.14 + SilverBullet entries + push.
