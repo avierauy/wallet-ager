@@ -80,7 +80,31 @@ const ensureRouterApproval = async ({ wallet, token, routerAddress }) => {
   return txHash;
 };
 
+// Pre-flight: simulate the swap via eth_call before broadcasting. Catches slippage reverts
+// (e.g. KyberSwap's "Return amount is not enough") and other deterministic failures without
+// spending gas. On revert we throw with the "clanker-api:" prefix so the executor's
+// dispatcher falls back to the UR path (which uses our own configurable slippageBps).
+//
+// Rationale: the Clanker quote API hardcodes a tight slippage tolerance into the calldata
+// (~1%). On fresh launches with low liquidity + sniper competition, the price moves enough
+// between quote and broadcast that the tx reverts on slippage. Pre-simulation catches this
+// upfront — observed live in v13.15 with 100% revert rate on Clanker buys.
+const simulateOrThrow = async ({ wallet, quote }) => {
+  try {
+    await deps.publicClient.call({
+      account: wallet.account,
+      to: quote.txData.to,
+      data: quote.txData.data,
+      value: quote.txData.value ?? 0n,
+    });
+  } catch (err) {
+    const reason = String(err.shortMessage ?? err.message ?? err).slice(0, 150);
+    throw new Error(`clanker-api: simulation reverted (${reason})`);
+  }
+};
+
 const submitFromQuote = async ({ wallet, quote }) => {
+  await simulateOrThrow({ wallet, quote });
   const writeClient = deps.walletClientFor(wallet.account);
   return writeClient.sendTransaction({
     to: quote.txData.to,

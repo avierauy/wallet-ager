@@ -27,13 +27,13 @@ const successQuote = ({ value, outputAmount }) => ({
 });
 
 // Builds a mock publicClient/walletClient pair with introspection.
-const buildMockClients = ({ allowance = 0n } = {}) => {
-  const calls = { sentTx: [], approveTx: [], allowanceReads: [], receipts: [] };
+// `simulationReverts` makes publicClient.call (the pre-flight check) throw.
+const buildMockClients = ({ allowance = 0n, simulationReverts = false } = {}) => {
+  const calls = { sentTx: [], approveTx: [], allowanceReads: [], receipts: [], simulations: [] };
   const publicClient = {
     readContract: async ({ functionName, args }) => {
       if (functionName === "allowance") {
         calls.allowanceReads.push(args);
-        // First read: configured value. Second read (after approve): saturated.
         if (calls.allowanceReads.length === 1) return allowance;
         return maxUint256;
       }
@@ -42,6 +42,15 @@ const buildMockClients = ({ allowance = 0n } = {}) => {
     waitForTransactionReceipt: async ({ hash }) => {
       calls.receipts.push(hash);
       return { status: "success" };
+    },
+    call: async (params) => {
+      calls.simulations.push(params);
+      if (simulationReverts) {
+        const err = new Error("execution reverted: Return amount is not enough");
+        err.shortMessage = "Execution reverted with reason: Return amount is not enough.";
+        throw err;
+      }
+      return { data: "0x" };
     },
   };
   const walletClient = {
@@ -188,5 +197,59 @@ describe("clankerAggregator", () => {
     );
     assert.equal(calls.approveTx.length, 0);
     assert.equal(calls.sentTx.length, 0);
+  });
+
+  test("buy: pre-simulation reverts → throws clanker-api: error, NO broadcast", async () => {
+    // v13.16 — slippage-tight calldata reverts on eth_call before we waste gas. The thrown
+    // error has the "clanker-api:" prefix so the dispatcher falls back to UR.
+    const { publicClient, walletClient, calls } = buildMockClients({ simulationReverts: true });
+    _setDeps({
+      getQuote: async () => successQuote({ value: 1234n, outputAmount: 9999n }),
+      publicClient,
+      walletClientFor: () => walletClient,
+    });
+
+    await assert.rejects(
+      buyExactEthForToken({ wallet: WALLET, tokenOut: TOKEN, amountInWei: 1234n }),
+      /clanker-api: simulation reverted/
+    );
+    assert.equal(calls.simulations.length, 1, "simulated before broadcast");
+    assert.equal(calls.sentTx.length, 0, "no broadcast when simulation reverts");
+  });
+
+  test("sell: pre-simulation reverts → throws after approval, NO swap broadcast", async () => {
+    // Approval still happens (needed for the simulation to be meaningful — without it,
+    // simulation would always revert on allowance check, hiding the actual slippage issue).
+    const { publicClient, walletClient, calls } = buildMockClients({
+      allowance: 0n, simulationReverts: true,
+    });
+    _setDeps({
+      getQuote: async () => successQuote({ value: 0n, outputAmount: 100n }),
+      publicClient,
+      walletClientFor: () => walletClient,
+    });
+
+    await assert.rejects(
+      sellExactTokenForEth({ wallet: WALLET, tokenIn: TOKEN, amountInWei: 1n }),
+      /clanker-api: simulation reverted/
+    );
+    assert.equal(calls.approveTx.length, 1, "approval was submitted (idempotent, cached after)");
+    assert.equal(calls.simulations.length, 1, "simulation ran after approval");
+    assert.equal(calls.sentTx.length, 0, "swap NOT broadcast on simulation revert");
+  });
+
+  test("buy: simulation passes → broadcast proceeds normally", async () => {
+    const { publicClient, walletClient, calls } = buildMockClients({ simulationReverts: false });
+    _setDeps({
+      getQuote: async () => successQuote({ value: 1234n, outputAmount: 9999n }),
+      publicClient,
+      walletClientFor: () => walletClient,
+    });
+
+    const r = await buyExactEthForToken({ wallet: WALLET, tokenOut: TOKEN, amountInWei: 1234n });
+
+    assert.equal(calls.simulations.length, 1);
+    assert.equal(calls.sentTx.length, 1, "broadcast after simulation passes");
+    assert.equal(r.txHash, "0xswaphash");
   });
 });

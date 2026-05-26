@@ -36,7 +36,7 @@ const SUCCESS_QUOTE = {
   outputAmount: 999999n,
 };
 
-const setupClankerMocks = ({ quoteResult }) => {
+const setupClankerMocks = ({ quoteResult, simulationReverts = false } = {}) => {
   let quoteCallCount = 0;
   clankerAggregator._setDeps({
     getQuote: async () => {
@@ -46,6 +46,16 @@ const setupClankerMocks = ({ quoteResult }) => {
     publicClient: {
       readContract: async () => 0n,
       waitForTransactionReceipt: async () => ({ status: "success" }),
+      // v13.16: clankerAggregator pre-simulates via eth_call before broadcasting. Tests
+      // pass simulationReverts:true to verify the dispatcher's UR fallback triggers.
+      call: async () => {
+        if (simulationReverts) {
+          const err = new Error("execution reverted: Return amount is not enough");
+          err.shortMessage = "Execution reverted with reason: Return amount is not enough.";
+          throw err;
+        }
+        return { data: "0x" };
+      },
     },
     walletClientFor: () => ({
       writeContract: async () => "0xappr0v3",
@@ -142,6 +152,35 @@ describe("executor: Clanker-source routing", () => {
       assert.ok(
         !String(threw.message).includes("clanker-api:"),
         "fallback consumed the clanker-api error; UR errors propagate independently"
+      );
+    }
+  });
+
+  test("v13.16: Clanker simulation revert → also falls back to UR (slippage protection)", async () => {
+    // The quoter returns success (calldata built), but the eth_call simulation reverts
+    // (e.g. KyberSwap slippage). The adapter throws "clanker-api: simulation reverted ..."
+    // which matches isClankerApiError → dispatcher falls back to UR.
+    const { getQuoteCallCount } = setupClankerMocks({
+      quoteResult: SUCCESS_QUOTE,
+      simulationReverts: true,
+    });
+
+    const plan = {
+      dex: "uniswap",
+      side: "buy",
+      token: { ...TOKEN, source: "clanker-v4" },
+      amountInWei: 1000n,
+      slippageBps: 50,
+    };
+    let threw = null;
+    try { await executeAction({ wallet: WALLET, plan }); } catch (err) { threw = err; }
+    assert.equal(getQuoteCallCount(), 1, "quoter still called once");
+    // No revert message should bubble up with clanker-api prefix — dispatcher caught it
+    // and fell through to UR (which will then fail in this mock, propagating its own error).
+    if (threw) {
+      assert.ok(
+        !String(threw.message).includes("clanker-api:"),
+        "simulation-revert error consumed by fallback path"
       );
     }
   });
