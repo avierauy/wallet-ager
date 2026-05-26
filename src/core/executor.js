@@ -5,7 +5,7 @@ import * as virtuals from "../adapters/virtuals.js";
 import { config } from "../config.js";
 import { notifyApproval, notifyError, notifyTrade } from "../notify/telegram.js";
 import { checkBeforeSell, checkBondingCurve, checkToken } from "../safety/index.js";
-import { SkipExecution } from "../util/errors.js";
+import { OnChainRevert, SkipExecution } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { inc } from "../util/metrics.js";
 import { withRetry } from "../util/retry.js";
@@ -329,6 +329,30 @@ export const executeAction = async ({ wallet, plan }) => {
         "execution skipped — pre-flight check"
       );
       return { status: "skipped", error: err.message };
+    }
+    // v13.17: on-chain revert (slippage, hook block, etc.) — distinct from RPC/network
+    // failures. Mark as `reverted` with the txHash so post-mortem can find it on BaseScan.
+    // Daily cap is NOT consumed (countSubmittedBuysOnDate only counts 'submitted'/'dry-run').
+    // The sniper's cooldown logic releases the wallet via its existing finally block.
+    if (err instanceof OnChainRevert) {
+      updateTrade(tradeId, { status: "reverted", tx_hash: err.txHash, error: err.message });
+      inc("trade", { status: "reverted", dex: plan.dex, side: plan.side });
+      logger.warn(
+        { walletId: wallet.id, walletAddress: wallet.account.address,
+          dex: plan.dex, side: plan.side, txHash: err.txHash, gasUsed: err.gasUsed?.toString?.() },
+        "execution reverted on-chain"
+      );
+      if (!plan.silentOnFail) {
+        notifyError({
+          walletId: wallet.id,
+          walletAddress: wallet.account.address,
+          dex: plan.dex,
+          source: plan.token.source,
+          error: `on-chain revert: ${err.message.slice(0, 100)}`,
+          explorer: config.chain.blockExplorer,
+        });
+      }
+      return { status: "reverted", error: err.message, txHash: err.txHash };
     }
     updateTrade(tradeId, { status: "failed", error: err.message });
     inc("trade", { status: "failed", dex: plan.dex, side: plan.side });

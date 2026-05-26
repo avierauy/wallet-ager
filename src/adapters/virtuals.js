@@ -2,8 +2,9 @@ import { concat, encodeFunctionData, erc20Abi, parseAbi } from "viem";
 import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
 import { notifyApproval } from "../notify/telegram.js";
-import { SkipExecution } from "../util/errors.js";
+import { OnChainRevert, SkipExecution } from "../util/errors.js";
 import { logger } from "../util/logger.js";
+import { submitAndConfirm } from "../util/submitAndConfirm.js";
 import { waitForAllowance } from "../util/waitForAllowance.js";
 import * as uniswap from "./uniswap.js";
 
@@ -87,14 +88,25 @@ export const buyPreGrad = async ({ account, agentToken, amountInVirtualWei, minO
   const wallet = walletClientFor(account);
   const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSecs);
   const data = buildBuyPreGradData({ agentToken, amountInVirtualWei, minOutWei, deadline });
-  return wallet.sendTransaction({ to: PRE_GRAD_ROUTER(), data });
+  // v13.17: wait + verify receipt. On revert (token graduated / pool closed / hook reject),
+  // submitAndConfirm throws OnChainRevert which the caller (executeBuyFlow) converts to
+  // SkipExecution so the daily cap isn't burned and Telegram isn't spammed.
+  const { hash } = await submitAndConfirm({
+    publicClient, walletClient: wallet,
+    tx: { to: PRE_GRAD_ROUTER(), data },
+  });
+  return hash;
 };
 
 export const sellPreGrad = async ({ account, agentToken, amountInWei, minOutVirtualWei, deadlineSecs = 600 }) => {
   const wallet = walletClientFor(account);
   const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSecs);
   const data = buildSellPreGradData({ agentToken, amountInWei, minOutVirtualWei, deadline });
-  return wallet.sendTransaction({ to: PRE_GRAD_ROUTER(), data });
+  const { hash } = await submitAndConfirm({
+    publicClient, walletClient: wallet,
+    tx: { to: PRE_GRAD_ROUTER(), data },
+  });
+  return hash;
 };
 
 // ---- READ HELPERS ----
@@ -212,9 +224,12 @@ export const executeBuyFlow = async ({ wallet, agentToken, plannedAmountInWei, s
       minOutWei: minOut,
     });
   } catch (err) {
-    if (/execution reverted|reverted/i.test(err.message ?? "")) {
+    // v13.17: OnChainRevert is the post-broadcast confirmation; the legacy regex catches
+    // pre-broadcast RPC rejections that include "reverted" in the message. Both indicate
+    // the BondingV5.buy was structurally rejected (graduated token, closed curve, hook).
+    if (err instanceof OnChainRevert || /execution reverted|reverted/i.test(err.message ?? "")) {
       throw new SkipExecution(
-        `BondingV5.buy reverted (token graduated or pool closed): ${err.message.slice(0, 120)}`
+        `BondingV5.buy reverted (token graduated or pool closed): ${(err.message ?? "").slice(0, 120)}`
       );
     }
     throw err;

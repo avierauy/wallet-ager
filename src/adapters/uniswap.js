@@ -7,6 +7,7 @@ import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
 import { ethersProvider } from "../util/ethersProvider.js";
 import { signPermitSingle } from "../util/permit2.js";
+import { submitAndConfirm } from "../util/submitAndConfirm.js";
 import { buyDirect, isDirectSwappable, isSellDirectSwappable, sellDirect } from "./directSwap.js";
 import { logger } from "../util/logger.js";
 
@@ -97,11 +98,14 @@ export const approveTokenToPermit2 = async ({ account, token }) => {
 const submitRoute = async ({ account, route }) => {
   const wallet = walletClientFor(account);
   const { to, calldata, value } = route.methodParameters;
-  return wallet.sendTransaction({
-    to,
-    data: calldata,
-    value: BigInt(value),
+  // v13.17: wait for receipt + verify status. On-chain reverts (slippage exceeded,
+  // hook block, etc.) throw OnChainRevert which propagates up to the executor.
+  const { hash } = await submitAndConfirm({
+    publicClient,
+    walletClient: wallet,
+    tx: { to, data: calldata, value: BigInt(value) },
   });
+  return hash;
 };
 
 export const buyExactEthForToken = async ({ account, tokenOut, amountInWei, slippageBps }) => {

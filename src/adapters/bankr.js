@@ -1,6 +1,7 @@
 import { erc20Abi, isAddressEqual } from "viem";
 import { config } from "../config.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
+import { submitAndConfirm } from "../util/submitAndConfirm.js";
 
 // 0x AllowanceHolder exposes only `execute` — we don't need to encode it ourselves.
 // The 0x Swap API returns `to`, `data`, `value`, `allowanceTarget`, `buyAmount`, etc.
@@ -51,12 +52,18 @@ export const ensureAllowance = async ({ account, token, spender, amount }) => {
 
 export const submitZeroExSwap = async ({ account, quote }) => {
   const wallet = walletClientFor(account);
-  return wallet.sendTransaction({
-    to: quote.transaction.to,
-    data: quote.transaction.data,
-    value: BigInt(quote.transaction.value ?? "0"),
-    gas: quote.transaction.gas ? BigInt(quote.transaction.gas) : undefined,
+  // v13.17: wait + verify receipt. Reverts throw OnChainRevert.
+  const { hash } = await submitAndConfirm({
+    publicClient,
+    walletClient: wallet,
+    tx: {
+      to: quote.transaction.to,
+      data: quote.transaction.data,
+      value: BigInt(quote.transaction.value ?? "0"),
+      gas: quote.transaction.gas ? BigInt(quote.transaction.gas) : undefined,
+    },
   });
+  return hash;
 };
 
 export const swap = async ({ account, sellToken, buyToken, sellAmount, slippageBps }) => {

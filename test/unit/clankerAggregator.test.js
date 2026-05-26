@@ -27,8 +27,11 @@ const successQuote = ({ value, outputAmount }) => ({
 });
 
 // Builds a mock publicClient/walletClient pair with introspection.
-// `simulationReverts` makes publicClient.call (the pre-flight check) throw.
-const buildMockClients = ({ allowance = 0n, simulationReverts = false } = {}) => {
+// `simulationReverts`: makes publicClient.call (the pre-flight check) throw.
+// `swapRevertsOnChain`: simulation passes, broadcast lands, but receipt status=reverted (v13.17).
+const buildMockClients = ({
+  allowance = 0n, simulationReverts = false, swapRevertsOnChain = false,
+} = {}) => {
   const calls = { sentTx: [], approveTx: [], allowanceReads: [], receipts: [], simulations: [] };
   const publicClient = {
     readContract: async ({ functionName, args }) => {
@@ -41,7 +44,10 @@ const buildMockClients = ({ allowance = 0n, simulationReverts = false } = {}) =>
     },
     waitForTransactionReceipt: async ({ hash }) => {
       calls.receipts.push(hash);
-      return { status: "success" };
+      // Swap txs (0xswaphash) honor swapRevertsOnChain; approve txs (0xappr0v3) always succeed
+      const isSwap = hash === "0xswaphash";
+      if (isSwap && swapRevertsOnChain) return { status: "reverted", gasUsed: 50000n };
+      return { status: "success", gasUsed: 100000n };
     },
     call: async (params) => {
       calls.simulations.push(params);
@@ -134,7 +140,8 @@ describe("clankerAggregator", () => {
     assert.equal(calls.approveTx[0].args[0], ROUTER_KYBER, "spender = chosen router");
     assert.equal(calls.approveTx[0].args[1], maxUint256, "amount = max");
     assert.equal(calls.sentTx.length, 1, "swap submitted after approval");
-    assert.equal(calls.receipts.length, 1, "waited for approve receipt");
+    // v13.17: now we wait for BOTH the approve receipt AND the swap receipt
+    assert.equal(calls.receipts.length, 2, "waited for approve + swap receipts");
 
     // Approval recorded in DB
     const row = db.prepare(
@@ -251,5 +258,45 @@ describe("clankerAggregator", () => {
     assert.equal(calls.simulations.length, 1);
     assert.equal(calls.sentTx.length, 1, "broadcast after simulation passes");
     assert.equal(r.txHash, "0xswaphash");
+  });
+
+  test("v13.17: buy where sim passes but receipt reverts → re-throws as clanker-api: for UR fallback", async () => {
+    // Race: between sim (eth_call) and broadcast, price moved enough that the actual tx
+    // reverts on-chain. The clankerAggregator catches the OnChainRevert and re-throws with
+    // the clanker-api: prefix so the dispatcher's existing fallback to UR kicks in.
+    const { publicClient, walletClient, calls } = buildMockClients({
+      simulationReverts: false, swapRevertsOnChain: true,
+    });
+    _setDeps({
+      getQuote: async () => successQuote({ value: 1234n, outputAmount: 9999n }),
+      publicClient,
+      walletClientFor: () => walletClient,
+    });
+
+    await assert.rejects(
+      buyExactEthForToken({ wallet: WALLET, tokenOut: TOKEN, amountInWei: 1234n }),
+      /clanker-api: tx reverted on-chain/
+    );
+    assert.equal(calls.simulations.length, 1, "sim still ran (and passed)");
+    assert.equal(calls.sentTx.length, 1, "tx was broadcast");
+    assert.equal(calls.receipts.length, 1, "we waited for the receipt");
+  });
+
+  test("v13.17: sell where receipt reverts → also re-thrown as clanker-api: for fallback", async () => {
+    const { publicClient, walletClient, calls } = buildMockClients({
+      allowance: maxUint256, simulationReverts: false, swapRevertsOnChain: true,
+    });
+    _setDeps({
+      getQuote: async () => successQuote({ value: 0n, outputAmount: 100n }),
+      publicClient,
+      walletClientFor: () => walletClient,
+    });
+
+    await assert.rejects(
+      sellExactTokenForEth({ wallet: WALLET, tokenIn: TOKEN, amountInWei: 50n }),
+      /clanker-api: tx reverted on-chain/
+    );
+    assert.equal(calls.sentTx.length, 1);
+    assert.equal(calls.receipts.length, 1);
   });
 });

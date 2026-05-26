@@ -16,7 +16,9 @@ import { config } from "../config.js";
 import { hasApproval, recordApproval } from "../core/db.js";
 import { publicClient, walletClientFor } from "../core/rpc.js";
 import { CLANKER_NATIVE_TOKEN, getQuote as defaultGetQuote } from "../util/clankerQuoter.js";
+import { OnChainRevert } from "../util/errors.js";
 import { logger } from "../util/logger.js";
+import { submitAndConfirm } from "../util/submitAndConfirm.js";
 import { waitForAllowance } from "../util/waitForAllowance.js";
 
 // DI for tests — replaceable transport.
@@ -106,11 +108,27 @@ const simulateOrThrow = async ({ wallet, quote }) => {
 const submitFromQuote = async ({ wallet, quote }) => {
   await simulateOrThrow({ wallet, quote });
   const writeClient = deps.walletClientFor(wallet.account);
-  return writeClient.sendTransaction({
-    to: quote.txData.to,
-    data: quote.txData.data,
-    value: quote.txData.value ?? 0n,
-  });
+  try {
+    const { hash } = await submitAndConfirm({
+      publicClient: deps.publicClient,
+      walletClient: writeClient,
+      tx: {
+        to: quote.txData.to,
+        data: quote.txData.data,
+        value: quote.txData.value ?? 0n,
+      },
+    });
+    return hash;
+  } catch (err) {
+    // If the broadcast lands but reverts on-chain (race between sim pass and broadcast),
+    // re-throw with the "clanker-api:" prefix so the dispatcher falls back to UR — same
+    // way it would for a simulation-time revert. Without this prefix the executor would
+    // mark the trade as `reverted` permanently, missing the chance to retry via UR.
+    if (err instanceof OnChainRevert) {
+      throw new Error(`clanker-api: tx reverted on-chain (hash=${err.txHash})`);
+    }
+    throw err;
+  }
 };
 
 // buy: ETH → token. No approval needed (we send ETH directly in tx.value).
