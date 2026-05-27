@@ -445,3 +445,76 @@ DB persistida con histórico del cycle 2026-05-26 (172 buys + 149 sells + revert
 - `confirmed_at` poblado en todos los trades nuevos (forensics más confiables)
 
 Cuando juntemos data de varios cycles, re-correr `clanker-window-tracker.js` afinará el P99 — si vemos windows >3min consistentemente, subir `SNIPER_CLANKER_SELL_RETRY_INTERVAL_MS` o `SNIPER_CLANKER_SELL_MAX_ATTEMPTS`.
+
+## Session 2026-05-27 madrugada — v13.19 stuck-sell watchdog + bytes32 SOR tolerance
+
+### Contexto
+
+Live cycle continuó del 2026-05-26 PM al 2026-05-27 AM (UTC). Dos days back-to-back saturados 62/62 wallets. Pero el cycle del 2026-05-27 cerró con **10 Clanker-v4 positions stuck** (~01:14 UTC), buys entre 00:00 y 00:37. La retry config v13.18 (10×1min = 10 min) fue insuficiente para esos 10 tokens — la cola larga del hook window es más gruesa de lo que el forensic inicial midió.
+
+Adicional: a las 01:24:55 surgió un **`unhandled rejection — invalid bytes32 string - no null terminator`** desde SOR's `TokenProvider.getTokens` parseando metadata corrupta de algún token Clanker. processGuards de v13.0 lo catcheó (daemon survived) pero generó spam Telegram.
+
+### Diagnóstico de las 10 stuck
+
+- TODAS clanker-v4 (MEMES, Veil MCP, MDSP, PAYDAI, Gitlawbase AI, MINNING, GLAWB, VNEM, MONKEY, PERCOCHAOS)
+- TODAS dex=uniswap (Universal Router via AlphaRouter)
+- Buys agrupados en 37 min
+- Sniper retry chain expiró ~10 min después de cada buy → stuck
+- bytes32 error **separado** — ocurrió 37+ min después que todos los retry windows expiraron. NO causa raíz.
+
+### Cambios v13.19 (commit `deba9fe`)
+
+**A) Stuck-sell watchdog** (`src/orchestrator/stuckSellWatchdog.js`)
+- `setInterval` (default `STUCK_SELL_WATCHDOG_INTERVAL_MS=10min`)
+- Query: today's buys con status `submitted`/`dry-run` sin matching sell + older than `MIN_AGE_MS` (default 15min, past sniper retry)
+- Fire one sell por stuck vía `executor.executeAction`, slippage max (`sellSlippageBpsMax` o 2500bps), `silentOnFail=true`
+- dailyCleanup a las 23:30 sigue siendo owner del dust notification
+- 8 unit tests cubriendo age filter, matching-sell exclude, failed-sell-not-closed, scoping, dedup, dry-run inclusion
+
+**B) Bytes32 SOR tolerance**
+- `src/adapters/uniswap.js`: `SUBGRAPH_SOFT_ERROR` regex extendido con `invalid bytes32 string`. Foreground path → "no route found" (executor lo trata como failed trade).
+- `src/util/processGuards.js`: nuevo `KNOWN_RECOVERABLE_REJECTIONS` regex (bytes32 + subgraph). Sigue logueando WARN para audit, pero NO Telegram — silencia el spam del SOR background side-fetch.
+
+**C) Wiring**
+- `src/index.js`: `startStuckSellWatchdog`/`stopStuckSellWatchdog` integrados en startup/shutdown.
+
+### Validación in-prod
+
+Daemon restart post-fix a las 02:59:38 UTC heredando las 10 stuck:
+
+| Tiempo | Evento | Stuck |
+|---|---|---|
+| 03:12:57 | watchdog scheduled (startup done) | 10 |
+| 03:19:24 | aging tick cierra MONKEY natural | 9 |
+| 03:22:57 | watchdog tick 1 — 9 sells paralelas, 8 OK + 1 Clanker revert | 1 |
+| 03:32:57 | watchdog tick 2 — MINNING cerrada | **0** |
+
+Cycle: buys=sells=268, zero stuck. Daemon stopped 03:33 UTC.
+
+bytes32 silencer: armado pero no surface durante esta corrida. Unverified end-to-end.
+
+### Hallazgo — corrección del modelo previo
+
+**La cola larga de outliers es más gruesa de lo que v13.18 estimó.** El forensic inicial decía P99=3min con outliers ~1%. Realidad observada en este cycle: **10/268 buys = 3.7% outliers**. El window puede durar horas (validado: aging cerró MONKEY a las 2.9h post-buy; watchdog cerró los demás entre 3.3h y 3.5h post-buy).
+
+Esto NO invalida v13.18 — el retry inicial sigue cubriendo el 96.3% de los casos eficientemente. El watchdog es safety net para la cola larga.
+
+### Decisiones clave
+
+- **Watchdog complementa, no reemplaza** la retry config de sniper. v13.18 sigue siendo first line of defense; watchdog cubre cola larga.
+- **silentOnFail=true** en watchdog. dailyCleanup a las 23:30 owns la notif definitiva de dust.
+- **No implementamos OKX/multi-router fallback** (opción rechazada anteriormente, ahora también — watchdog + aging cierra 100% asumiendo daemon vivo).
+- **Defaults 10min/15min** calibrados: rapid recovery sin race con sniper retry (15 > 10 Clanker window).
+- **Tests 297/297** (8 nuevos del watchdog test).
+
+### Pickup point para próxima sesión
+
+Repo limpio, todo pusheado al main:
+- `deba9fe` v13.19 (stuck watchdog + bytes32 tolerance)
+
+DB persistida con dos cycles consecutivos clean. Stuck positions: 0. Daemon parado, sin zombies.
+
+**Pendientes**:
+- Investigar si SOR side-fetches corrompen state del provider durante watcher cascades — el cycle previo tuvo dos cascades (21:09 y 01:26), el segundo correlaciona con el bytes32 unhandled rejection (1.5min después).
+- Si vemos 3%+ stuck en otro cycle, considerar revisar Plan C (OKX adapter) con la data nueva.
+- bytes32 silencer end-to-end test: necesitamos un token con metadata corrupta para verificar in-prod.
