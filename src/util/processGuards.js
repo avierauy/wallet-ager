@@ -24,11 +24,25 @@ const safeNotify = (text) => {
   });
 };
 
+// Known background-task rejections from transitive deps that we already classify elsewhere
+// and don't need a Telegram ping for. They still hit the log at WARN for the audit trail.
+// Pattern sources:
+//   `invalid bytes32 string` — SOR TokenProvider.getTokens parses token name/symbol with
+//      parseBytes32String; a token with non-null-terminated encoding throws. Observed on
+//      a Clanker fresh launch 2026-05-27. The main quote() catches its own promise; the
+//      noisy one is the unawaited side-fetch inside CachingTokenProviderWithFallback.
+//   `failed to get subgraph pools|subgraph` — SOR fires unawaited subgraph refreshes; the
+//      v13.0 catch motivated this whole file. Already covered by the uniswap adapter's
+//      own soft-error handling for the foreground path.
+const KNOWN_RECOVERABLE_REJECTIONS = /invalid bytes32 string|failed to get subgraph pools|subgraph pools/i;
+
 process.on("unhandledRejection", (reason) => {
   const msg = reason instanceof Error ? reason.message : String(reason);
   const stack = reason instanceof Error ? reason.stack : undefined;
   logger.warn({ err: msg, stack }, "unhandled promise rejection — daemon stays alive");
-  safeNotify(`daemon: unhandled rejection — ${msg.slice(0, 200)}`);
+  if (!KNOWN_RECOVERABLE_REJECTIONS.test(msg)) {
+    safeNotify(`daemon: unhandled rejection — ${msg.slice(0, 200)}`);
+  }
 });
 
 process.on("uncaughtException", (err) => {

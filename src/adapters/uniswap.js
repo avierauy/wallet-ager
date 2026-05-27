@@ -46,7 +46,10 @@ const toCurrency = ({ address, decimals, symbol }) => {
 // the V4 subgraph lagging behind chain state on fresh launches. We collapse them into the
 // same "no route found" surface the executor already knows how to treat as a failed trade,
 // instead of letting the raw stack escape and risk an unhandled rejection.
-const SUBGRAPH_SOFT_ERROR = /(failed to get subgraph pools|subgraph|no route)/i;
+// `invalid bytes32 string - no null terminator` surfaces when SOR's TokenProvider hits a
+// token whose name/symbol encoding lacks the trailing zero byte (observed 2026-05-27 on a
+// Clanker fresh launch) — same recovery: treat as unroutable.
+const SUBGRAPH_SOFT_ERROR = /(failed to get subgraph pools|subgraph|no route|invalid bytes32 string)/i;
 
 // quote: returns the AlphaRouter SwapRoute (covers V2/V3/V4 + splits). `methodParameters` has
 // `{ to, calldata, value }` ready to forward to viem.

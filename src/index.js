@@ -17,6 +17,7 @@ import { startTelegramBot, stopTelegramBot } from "./notify/telegramBot.js";
 import { startDailyCleanup, stopDailyCleanup } from "./orchestrator/dailyCleanup.js";
 import { startWalletLoop } from "./orchestrator.js";
 import { initSniper, _state as sniperState, _stopAll as stopSniper } from "./orchestrator/sniper.js";
+import { startStuckSellWatchdog, stopStuckSellWatchdog } from "./orchestrator/stuckSellWatchdog.js";
 import { logger } from "./util/logger.js";
 import { snapshot } from "./util/metrics.js";
 import { markStarted } from "./util/runtimeState.js";
@@ -107,6 +108,7 @@ async function main() {
   startClankerDiscovery();
   startSweeper();
   startDailyCleanup({ wallets });
+  startStuckSellWatchdog({ wallets });
 
   const shutdown = async (sig) => {
     logger.info({ sig }, "shutdown signal — exiting");
@@ -118,6 +120,7 @@ async function main() {
     stopSweeper();
     stopSniper();
     stopDailyCleanup();
+    stopStuckSellWatchdog();
     if (config.telegram.enabled) {
       try { await notifyInfo(`wallet-ager shutting down (${sig})`); } catch {}
     }
