@@ -1,6 +1,7 @@
 import { erc20Abi } from "viem";
 import { quote } from "../adapters/uniswap.js";
 import { logger } from "../util/logger.js";
+import { createSemaphore } from "../util/semaphore.js";
 import {
   getInitialSnapshot,
   getLatestSnapshot,
@@ -10,6 +11,7 @@ import { publicClient } from "./rpc.js";
 
 const NATIVE_SENTINEL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const QUOTE_RECIPIENT = "0x000000000000000000000000000000000000dEaD";
+const PRICE_FETCH_CONCURRENCY = 20;
 
 // In-memory negative cache for the price probe: meme tokens in tokens.json that
 // AlphaRouter cannot route get re-queried on every startup, generating ~35 warnings
@@ -25,36 +27,41 @@ export const _clearNoRouteCache = () => noRouteCache.clear(); // test helper
 export const fetchTokenPrices = async (tokens) => {
   const prices = new Map();
   const now = Date.now();
-  for (const token of tokens) {
-    const key = token.address.toLowerCase();
-    if (key === NATIVE_SENTINEL.toLowerCase()) {
-      prices.set(key, { probeAmount: 10n ** 18n, ethValue: 10n ** 18n });
-      continue;
-    }
-    // Skip the quote if we recently saw a no-route failure for this token.
-    const cachedUntil = noRouteCache.get(key);
-    if (cachedUntil && cachedUntil > now) {
-      prices.set(key, null);
-      continue;
-    }
-    const probeAmount = 10n ** BigInt(token.decimals);
-    try {
-      const route = await quote({
-        tokenIn: token,
-        tokenOut: { address: NATIVE_SENTINEL, decimals: 18, symbol: "ETH" },
-        amountInWei: probeAmount,
-        slippageBps: 100,
-        recipient: QUOTE_RECIPIENT,
-      });
-      const ethValue = BigInt(route.quote.quotient.toString());
-      prices.set(key, { probeAmount, ethValue });
-      noRouteCache.delete(key); // success — drop any stale negative entry
-    } catch (err) {
-      logger.warn({ token: token.symbol, err: err.message }, "price quote failed; valuing at 0");
-      prices.set(key, null);
-      noRouteCache.set(key, now + NO_ROUTE_CACHE_TTL_MS);
-    }
-  }
+  const sem = createSemaphore(PRICE_FETCH_CONCURRENCY);
+  await Promise.all(
+    tokens.map((token) =>
+      sem.run(async () => {
+        const key = token.address.toLowerCase();
+        if (key === NATIVE_SENTINEL.toLowerCase()) {
+          prices.set(key, { probeAmount: 10n ** 18n, ethValue: 10n ** 18n });
+          return;
+        }
+        // Skip the quote if we recently saw a no-route failure for this token.
+        const cachedUntil = noRouteCache.get(key);
+        if (cachedUntil && cachedUntil > now) {
+          prices.set(key, null);
+          return;
+        }
+        const probeAmount = 10n ** BigInt(token.decimals);
+        try {
+          const route = await quote({
+            tokenIn: token,
+            tokenOut: { address: NATIVE_SENTINEL, decimals: 18, symbol: "ETH" },
+            amountInWei: probeAmount,
+            slippageBps: 100,
+            recipient: QUOTE_RECIPIENT,
+          });
+          const ethValue = BigInt(route.quote.quotient.toString());
+          prices.set(key, { probeAmount, ethValue });
+          noRouteCache.delete(key); // success — drop any stale negative entry
+        } catch (err) {
+          logger.warn({ token: token.symbol, err: err.message }, "price quote failed; valuing at 0");
+          prices.set(key, null);
+          noRouteCache.set(key, now + NO_ROUTE_CACHE_TTL_MS);
+        }
+      })
+    )
+  );
   return prices;
 };
 
