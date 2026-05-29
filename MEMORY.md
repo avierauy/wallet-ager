@@ -518,3 +518,74 @@ DB persistida con dos cycles consecutivos clean. Stuck positions: 0. Daemon para
 - Investigar si SOR side-fetches corrompen state del provider durante watcher cascades — el cycle previo tuvo dos cascades (21:09 y 01:26), el segundo correlaciona con el bytes32 unhandled rejection (1.5min después).
 - Si vemos 3%+ stuck en otro cycle, considerar revisar Plan C (OKX adapter) con la data nueva.
 - bytes32 silencer end-to-end test: necesitamos un token con metadata corrupta para verificar in-prod.
+
+## Session 2026-05-28 → 2026-05-29 — v13.20 parallel price fetch + ciclo full clanker-v4
+
+### Contexto
+
+Restart del daemon post-v13.19 para correr otro ciclo. Tras arrancar (`npm start` con DRY_RUN=false), Agustin notó que el Telegram "wallet-ager started" no llegaba tras 5+ minutos. Diagnóstico encontró que `fetchTokenPrices` (`src/core/balanceTracker.js`) es **serial** (`for...of await`) sobre todo el token registry. Registry creció orgánicamente de ~35 tokens (v13.2 timeframe) a **932 hoy** debido al policy de DB-persiste-cross-runs (2026-05-26+). Con AlphaRouter quoteando a ~2-5s por token, startup proyectaba ~50min worst-case y bloqueaba sniper/discovery/watchdog en ese tiempo.
+
+### Cambio v13.20 (commit `3899aaf`)
+
+`src/core/balanceTracker.js`:
+- Nueva const `PRICE_FETCH_CONCURRENCY = 20` (matchea `STARTUP_SNAPSHOT_CONCURRENCY` del `ensureInitialSnapshot` que ya estaba paralelizado)
+- `Promise.all(tokens.map(token => sem.run(async () => { ... })))` reemplaza el loop serial
+- Per-token logic idéntica (NATIVE_SENTINEL shortcut, noRouteCache hit/miss, AlphaRouter quote, success/fail set en shared Map)
+- Tests 297/297 sin nuevos tests (paralelización es transformación pura)
+
+### Validación in-prod
+
+Restart con v13.20:
+- snapshotting phase a **T+1m40s** (vs ~50min serial estimado)
+- sniper initialized a **T+1m44s**
+- Ciclo completo posterior: **195 trades** (98 buys + 97 sells)
+- Zero crashes, zero unhandled rejections
+- Cierre verificado con `scripts/find-stuck-positions.js` sobre 83 wallets / 1029 buy pairs: **zero non-zero positions, wallets clean**
+
+### Análisis de distribución de buys
+
+Pregunta de Agustin: "por qué solo veo buys procesadas de clanker-v4". Análisis sobre 195 trades del ciclo:
+
+| Source | Discovery (tokens added) | Pool became tradeable | Buys ejecutadas |
+|---|---|---|---|
+| **clanker-v4** | 322 | 74 | **98** ✓ |
+| doppler-unknown | 343 | 13 | 0 |
+| uniswap-v4-fee8388608 | 516 | 12 | 0 |
+| uniswap-v4 (otros fees) | 142 | 9 | 0 |
+| virtuals-Launched | 2 | 0 | 0 |
+| uniswap-v3 | 4 | 0 | 0 |
+
+**3 razones estructurales (no bug, no regresión):**
+1. **Doppler**: 2,950 polling timeouts → hook anti-snipe bloquea entry. Documentado en v13.9, sigue siendo estructural.
+2. **Uniswap V4 orgánico**: el sniper.js solo dispara para sources matching `clanker-*|doppler-*|virtuals-*`. Pools V4 orgánicos van al registry para que aging los pickee, NO sniper.
+3. **Virtuals**: bajo flow (2 Launched + 3 Graduated en ~22h) + 23 skips por pre-flight A (ETH amount).
+
+**Aging mode prácticamente silent** (1 línea en 22h de uptime). Probablemente el daily cap ya está saturado por sniper antes de que aging tique, o el tick interval es agresivamente alto. Pendiente investigar.
+
+### Decisiones clave
+
+- **Paralelizar fetchTokenPrices** con semaphore=20 (matchea el resto del codebase). No tocar concurrency knob por ahora.
+- **NO persistir noRouteCache** a DB en esta sesión (out-of-scope). Si registry crece >3000, reconsiderar.
+- **NO tag git v13.20-*** — la práctica de tag-per-version se discontinuó después de v13.9. Rollback usa git revert por SHA.
+- **Distribución 100% clanker-v4 NO es bug** — es estructural. Memory project nueva agregada (`project_source_distribution_structural.md`) para no levantar falsa alarma futura.
+
+### Telegram bot inbound — 1 fallo durante sesión
+
+`telegramBot: send failed` a las 20:51:48 con `400 Bad Request: message is too long`. Probablemente respuesta a `/status` o `/recent` del bot inbound que generó >4096 chars. **El outbound (notifyTrade, los 195 trades) funcionó OK** — solo el inbound bot reply falla. Pendiente: truncar/paginar respuestas del bot.
+
+### Pickup point para próxima sesión
+
+Repo pusheado al main:
+- `3899aaf` v13.20 (parallel price fetch)
+
+DB persistida con ciclo limpio del 2026-05-27/28 (98 buys + 97 sells, zero stuck). Daemon parado, sin zombies. Tests 297/297.
+
+**Pendientes operacionales**:
+- **Aging silent**: 1 línea aging en 22h. Verificar configuración de tick interval y consumo del daily cap por sniper.
+- **Telegram bot reply truncation**: 1 send-fail por `message is too long`. Truncar o paginar `/status` y `/recent`.
+- **bytes32 silencer**: sigue armado pero no surface end-to-end aún (segundo ciclo consecutivo).
+- **OKX adapter / Plan C**: descartado nuevamente. Si vemos otra vez 3%+ stuck en un cycle, reconsiderar.
+
+**Pendientes de v13.x previos que siguen abiertos**:
+- Sweeper TTL en vivo (≥6h uptime continuous) — sigue pendiente confirmar primer sweep summary.
+- Investigar correlación SOR side-fetches ↔ watcher cascades.
