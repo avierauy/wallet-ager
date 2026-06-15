@@ -44,7 +44,15 @@ export const config = {
   chain: chainConfig,
   rpc: {
     primary: required("RPC_URL"),
+    // Global fallback — applied to every RPC client (discovery + swap). Use only with rate-limit-
+    // generous providers (paid backups). Public RPCs here will burn quota on discovery polling.
     fallback: optional("RPC_URL_FALLBACK")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    // Swap-only fallback — appended to swap-path clients (executor, adapters, watchdog retry,
+    // nonceManager). Discovery/snapshots stay on `primary + fallback`. Safe slot for public RPCs.
+    swapFallback: optional("RPC_URL_SWAP_FALLBACK")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),

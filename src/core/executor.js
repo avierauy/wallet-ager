@@ -11,7 +11,7 @@ import { inc } from "../util/metrics.js";
 import { withRetry } from "../util/retry.js";
 import { waitForAllowance } from "../util/waitForAllowance.js";
 import { hasApproval, insertTrade, recordApproval, updateTrade } from "./db.js";
-import { publicClient } from "./rpc.js";
+import { swapPublicClient as publicClient } from "./rpc.js";
 import { markTraded } from "./tokenRegistry.js";
 import { withWalletLock } from "./nonceManager.js";
 

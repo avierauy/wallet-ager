@@ -22,7 +22,7 @@
 import { createRequire } from "node:module";
 import { encodeFunctionData, erc20Abi, maxUint256, parseAbi } from "viem";
 import { config } from "../config.js";
-import { publicClient, walletClientFor } from "../core/rpc.js";
+import { swapPublicClient as publicClient, walletClientFor } from "../core/rpc.js";
 import { quoteV4Pool } from "../discovery/v4PoolKey.js";
 import { simulateBeforeBroadcast } from "../util/simulateBeforeBroadcast.js";
 import { submitAndConfirm } from "../util/submitAndConfirm.js";

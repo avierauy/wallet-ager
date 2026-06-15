@@ -1,5 +1,5 @@
 import { maxUint160, parseAbi } from "viem";
-import { publicClient } from "../core/rpc.js";
+import { swapPublicClient as publicClient } from "../core/rpc.js";
 import { config } from "../config.js";
 
 const PERMIT2_ABI = parseAbi([

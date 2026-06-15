@@ -13,7 +13,7 @@
 import { erc20Abi } from "viem";
 import { db } from "../core/db.js";
 import { executeAction } from "../core/executor.js";
-import { publicClient } from "../core/rpc.js";
+import { swapPublicClient as publicClient } from "../core/rpc.js";
 import { _listAll } from "../core/tokenRegistry.js";
 import { logger } from "../util/logger.js";
 import { inc } from "../util/metrics.js";

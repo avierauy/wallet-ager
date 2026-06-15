@@ -1,4 +1,4 @@
-import { publicClient } from "./rpc.js";
+import { swapPublicClient as publicClient } from "./rpc.js";
 
 // Per-wallet nonce state held in memory. On startup we read the chain's "pending" nonce; from
 // then on we increment locally and only resync when we detect drift (or on explicit refresh).

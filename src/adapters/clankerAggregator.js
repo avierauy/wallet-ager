@@ -14,7 +14,7 @@
 import { erc20Abi, maxUint256 } from "viem";
 import { config } from "../config.js";
 import { hasApproval, recordApproval } from "../core/db.js";
-import { publicClient, walletClientFor } from "../core/rpc.js";
+import { swapPublicClient as publicClient, walletClientFor } from "../core/rpc.js";
 import { CLANKER_NATIVE_TOKEN, getQuote as defaultGetQuote } from "../util/clankerQuoter.js";
 import { OnChainRevert } from "../util/errors.js";
 import { logger } from "../util/logger.js";

@@ -13,7 +13,7 @@ import { erc20Abi } from "viem";
 import { config } from "../config.js";
 import { db } from "../core/db.js";
 import { executeAction } from "../core/executor.js";
-import { publicClient } from "../core/rpc.js";
+import { swapPublicClient as publicClient } from "../core/rpc.js";
 import { _listAll } from "../core/tokenRegistry.js";
 import { notifyError } from "../notify/telegram.js";
 import { logger } from "../util/logger.js";

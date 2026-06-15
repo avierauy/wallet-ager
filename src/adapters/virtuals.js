@@ -1,6 +1,6 @@
 import { concat, encodeFunctionData, erc20Abi, parseAbi } from "viem";
 import { config } from "../config.js";
-import { publicClient, walletClientFor } from "../core/rpc.js";
+import { swapPublicClient as publicClient, walletClientFor } from "../core/rpc.js";
 import { notifyApproval } from "../notify/telegram.js";
 import { OnChainRevert, PreSimulationRevert, SkipExecution } from "../util/errors.js";
 import { logger } from "../util/logger.js";

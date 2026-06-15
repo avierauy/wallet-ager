@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 // from our fake chain instead of hitting an RPC.
 const fakePending = { count: 7 };
 const rpcModule = await import("../../src/core/rpc.js");
-rpcModule.publicClient.getTransactionCount = async () => fakePending.count;
+rpcModule.swapPublicClient.getTransactionCount = async () => fakePending.count;
 
 const { reserveNonce, releaseNonce, resyncNonce, withWalletLock, _clearState, getState } =
   await import("../../src/core/nonceManager.js");

@@ -4,7 +4,7 @@
 import { createRequire } from "node:module";
 import { erc20Abi, maxUint256 } from "viem";
 import { config } from "../config.js";
-import { publicClient, walletClientFor } from "../core/rpc.js";
+import { swapPublicClient as publicClient, walletClientFor } from "../core/rpc.js";
 import { ethersProvider } from "../util/ethersProvider.js";
 import { signPermitSingle } from "../util/permit2.js";
 import { simulateBeforeBroadcast } from "../util/simulateBeforeBroadcast.js";

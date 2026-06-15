@@ -16,17 +16,17 @@ const VIRT_TOKEN = "0x" + "1".repeat(40);
 const UNI_TOKEN = "0x" + "2".repeat(40);
 const STALE_TOKEN = "0x" + "3".repeat(40);
 
-const originalRead = rpc.publicClient.readContract;
+const originalRead = rpc.swapPublicClient.readContract;
 const originalFetch = globalThis.fetch;
 const restore = () => {
-  rpc.publicClient.readContract = originalRead;
+  rpc.swapPublicClient.readContract = originalRead;
   globalThis.fetch = originalFetch;
 };
 
 const stubVirtualsSafety = (pct) => {
   // safetyRoundtripPct: total roundtrip loss as a percentage.
   // checkBondingCurve makes two getAmountsOut calls; return half the loss per call.
-  rpc.publicClient.readContract = async ({ functionName, args }) => {
+  rpc.swapPublicClient.readContract = async ({ functionName, args }) => {
     if (functionName === "getAmountsOut") {
       const amountIn = args[2];
       return (amountIn * BigInt(Math.floor(100 - pct / 2))) / 100n;

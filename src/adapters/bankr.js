@@ -1,6 +1,6 @@
 import { erc20Abi, isAddressEqual } from "viem";
 import { config } from "../config.js";
-import { publicClient, walletClientFor } from "../core/rpc.js";
+import { swapPublicClient as publicClient, walletClientFor } from "../core/rpc.js";
 import { simulateBeforeBroadcast } from "../util/simulateBeforeBroadcast.js";
 import { submitAndConfirm } from "../util/submitAndConfirm.js";
 

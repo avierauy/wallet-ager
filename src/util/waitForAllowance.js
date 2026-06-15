@@ -1,5 +1,5 @@
 import { erc20Abi } from "viem";
-import { publicClient } from "../core/rpc.js";
+import { swapPublicClient as publicClient } from "../core/rpc.js";
 
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_TIMEOUT_MS = 15_000;

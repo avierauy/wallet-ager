@@ -10,7 +10,7 @@
 import { erc20Abi } from "viem";
 import { config } from "../config.js";
 import { executeAction as defaultExecuteAction } from "../core/executor.js";
-import { publicClient as defaultPublicClient } from "../core/rpc.js";
+import { swapPublicClient as defaultPublicClient } from "../core/rpc.js";
 import { notifyError } from "../notify/telegram.js";
 import { getDailyState, recordTrade } from "../strategy/dailyCounter.js";
 import { isPaused } from "../util/runtimeState.js";
