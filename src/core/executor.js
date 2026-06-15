@@ -16,6 +16,22 @@ import { markTraded } from "./tokenRegistry.js";
 import { withWalletLock } from "./nonceManager.js";
 
 const NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+// A terminal "no route found" is the expected outcome of sniping a fresh launchpad token
+// before its pool routes (sniper fanout buys land here en masse — see 2026-06-01 forensics:
+// 80/82 terminal failures were sniper clanker buys that fell to the UR fallback) and of aging
+// picking a token whose pool has since died. It is non-actionable noise on Telegram. We
+// suppress the per-failure ping while still recording it (DB status + metric + ERROR log) so
+// the failure rate stays observable for monitoring. Genuinely actionable failures (e.g. wallet
+// out of gas) still notify.
+const NO_NOTIFY_FAILURE_RE = /no route found/i;
+
+// Decide whether a terminal trade failure should page the operator via Telegram. Sniper retries
+// set silentOnFail (the sniper notifies once on exhaustion); expected no-route failures are
+// suppressed regardless. Exported for unit testing.
+export const shouldNotifyFailure = (errMessage, silentOnFail) =>
+  !silentOnFail && !NO_NOTIFY_FAILURE_RE.test(String(errMessage ?? ""));
+
 const ETH_LEG = (amountWei) => ({ symbol: "ETH", decimals: 18, amountWei });
 const VIRTUAL_LEG = (amountWei) => ({ symbol: "VIRTUAL", decimals: 18, amountWei });
 const TOKEN_LEG = (token, amountWei) => ({ symbol: token.symbol, decimals: token.decimals, amountWei });
@@ -379,8 +395,10 @@ export const executeAction = async ({ wallet, plan }) => {
     updateTrade(tradeId, { status: "failed", error: err.message });
     inc("trade", { status: "failed", dex: plan.dex, side: plan.side });
     // Sniper retries set plan.silentOnFail so the operator only gets a Telegram message
-    // once retries are exhausted (sniper handles that final notification itself).
-    if (!plan.silentOnFail) {
+    // once retries are exhausted (sniper handles that final notification itself). Expected
+    // no-route failures are suppressed too (see NO_NOTIFY_FAILURE_RE) — they still hit the
+    // ERROR log + failed-trade metric below for observability.
+    if (shouldNotifyFailure(err.message, plan.silentOnFail)) {
       notifyError({
         walletId: wallet.id,
         walletAddress: wallet.account.address,

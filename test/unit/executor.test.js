@@ -1,7 +1,7 @@
 import { describe, test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { db } from "../../src/core/db.js";
-import { executeAction } from "../../src/core/executor.js";
+import { executeAction, shouldNotifyFailure } from "../../src/core/executor.js";
 
 // Module bindings from ESM are read-only, so we can't monkey-patch adapter exports. We exercise
 // the executor via DRY_RUN (no adapter call ever) and via fetch stubbing for the honeypot.is
@@ -116,5 +116,29 @@ describe("executeAction (DRY_RUN env, fetch-stubbed safety)", () => {
     const plan = { ...PLAN_BUY, token: { ...TOKEN, source: "uniswap-v3-fee3000" } };
     const result = await executeAction({ wallet: WALLET, plan });
     assert.equal(result.status, "skipped", "generic uniswap discovery must still be safety-checked");
+  });
+});
+
+describe("shouldNotifyFailure — Telegram gating for terminal failures", () => {
+  test("actionable failure with no silentOnFail → notifies", () => {
+    assert.equal(shouldNotifyFailure("insufficient funds for gas", false), true);
+  });
+
+  test("'no route found' → suppressed even when not silent", () => {
+    assert.equal(shouldNotifyFailure("no route found", false), false);
+  });
+
+  test("'no route found' match is case-insensitive and substring", () => {
+    assert.equal(shouldNotifyFailure("AlphaRouter: No Route Found for pair", false), false);
+  });
+
+  test("silentOnFail suppresses any failure (sniper retry path)", () => {
+    assert.equal(shouldNotifyFailure("insufficient funds for gas", true), false);
+    assert.equal(shouldNotifyFailure("no route found", true), false);
+  });
+
+  test("null/undefined error message does not throw and does not notify on no-route absence", () => {
+    assert.equal(shouldNotifyFailure(undefined, false), true);
+    assert.equal(shouldNotifyFailure(null, false), true);
   });
 });
