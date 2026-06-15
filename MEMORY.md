@@ -630,3 +630,43 @@ Repo pusheado al main (`4b76fb2`). DB persistida. Daemon parado. Tests 297/297. 
 **Pendiente inmediato:** Agustin va a correr el daemon esta noche (real, fondos reales) — primera corrida con v13.21. Antes debe editar su `.env` real con el nuevo knob. Sugerido: `npm run dry-run` para verificar boot limpio antes del `npm start`.
 
 **Gap abierto:** forensics del outage 2026-06-01 (ver arriba).
+
+## Session 2026-06-15 — forensics outage RESUELTO (era sleep, no Infura) + v13.22 no-route notify suppression
+
+### Contexto
+Carga de contexto + dos tareas encadenadas: (1) cerrar el gap de forensics del "outage de Infura 2026-06-01" usando el `data/daemon-2026-06-01.log` (6.9MB, que seguía en disco); (2) Agustin reportó spam de `no route found` / `price quote fail` en Telegram que "no pasaba en versiones anteriores".
+
+### Hallazgo 1 — el "outage de Infura" NO fue Infura. Fue **sleep de la máquina**.
+
+Evidencia convergente:
+- **Windows Power-Troubleshooter** (fuente dura): `Sleep 2026-06-01T02:55:15Z → Wake 2026-06-01T11:53:02Z` = ~8h58m de suspend. Wake Source: Unknown.
+- **Log del daemon**: silencio total `04:51:14 → 12:08:05` (~7h17m, reloj local). **Mismo proceso** (no hay línea de boot en el gap). El `metrics snapshot` corre cada 5min como reloj hasta 04:51:03 y después nada hasta 12:08:05 — un `setInterval` no se saltea 7h con el event loop vivo. Al despertar: 12.576 watcher-errors en 1h (re-suscripción de filtros expirados) + 40 trades reanudados.
+- Los últimos errores antes del freeze eran `HTTP request failed … fetch failed` a Infura = stack de red local cayendo al suspender, NO Infura devolviendo 4xx/5xx.
+
+**Implicación incómoda:** v13.21 (split RPC con público como fallback) está **mal motivado**. Durante un sleep no corre nada — un fallback de RPC no ayuda a un proceso suspendido, y al despertar la recuperación de filtros de viem ya self-healed sola. v13.21 no es dañino (sigue siendo resiliencia razonable para una degradación real de Infura) pero **no habría prevenido ni mitigado este incidente**. Mitigación real = OS-level: `powercfg /change standby-timeout-ac 0` (+ hibernate off) mientras corre el daemon, o correr headless en máquina que no duerme.
+
+### Hallazgo 2 — el spam de Telegram es `no route found` del **sniper**, no aging
+
+- `price quote failed; valuing at 0` → **`logger.warn` puro** (balanceTracker.js:58), NUNCA va a Telegram. Lo que ve en consola (pino-pretty stdout), no Telegram. Falsa alarma.
+- `no route found` → SÍ va a Telegram vía `executor.notifyError` en el catch de `status:failed` cuando `!silentOnFail`. Path existe **desde el commit inicial** — no es regresión de código.
+- **Atribución correcta (timestamp + walletId): 80/82 fallos no-route eran SNIPER clanker fanout buys** cayendo al fallback UR antes de que el pool fresco rutee (los otros 2, aging). `fireOneSniperBuy` arma el plan **sin `silentOnFail`** → cada miss esperado pingueaba Telegram.
+  - **Nota metodológica**: mi primera atribución dio "todo aging / 15:1 buy" — estaba MAL (grep `-B14` contaminado con campos de bloques vecinos + bug en awk de proximidad por líneas). El `execution failed` log NO trae `side` ni `source`. La atribución por timestamp+walletId es la válida. Lección registrable: no atribuir por distancia-en-líneas cuando hay log intercalado (watchers/fanout).
+
+### Cambio v13.22 (commit `c9580f7`, pusheado)
+`src/core/executor.js`:
+- `NO_NOTIFY_FAILURE_RE = /no route found/i` + predicado puro exportado `shouldNotifyFailure(errMessage, silentOnFail)`.
+- Gateado el `notifyError` del catch genérico de `failed`. **NO tocado**: path `OnChainRevert` (revert gasta gas ≠ no-route), plan de buy del sniper, y fallos accionables tipo "wallet sin gas" — todos siguen notificando.
+- `logger.error` + `inc("trade",{status:"failed"})` **preservados** → la tasa de no-route sigue observable (Agustin quiere monitorearla a futuro para detectar si UR/AlphaRouter empieza a fallar de más).
+- `test/unit/executor.test.js`: +5 tests del predicado. **302/302**.
+
+### Rechazado
+- **Opción B** (filtrar aging buy-pool con noRouteCache) — el usuario la eligió primero, pero la atribución corregida mostró que rinde ~2% (solo 2/82 son aging). Diferida como mejora de eficiencia separada, no como fix del spam.
+- **Opción A′** (silentOnFail en sniper buy) — equivalente pero más invasiva; A cubre 100% en un punto.
+
+### Pendientes / follow-ups
+- **Monitor de no-route rate** (cuando Agustin diga): contador dedicado `inc("trade",{status:"failed",reason:"no-route"})` o script pasivo estilo `clanker-window-tracker.js` que compute no-route rate por fuente/hora sobre la DB. Para validar que el 80/82 no escale.
+- **Prevenir sleep de la máquina** mientras corre el daemon (raíz del incidente 06-01). Operacional, no código.
+- v13.21 sigue sin su primera corrida real validada (la del 06-01 fue pre-v13.21 y murió por sleep).
+
+### Pickup point
+Repo pusheado a main: `c9580f7` (v13.22). DB persistida. Tests 302/302. SilverBullet actualizado ([[decisions/2026-06-15-v13.22-no-route-notify-suppression]]) + gap de forensics del 06-01 cerrado retroactivamente en [[decisions/2026-06-14-v13.21-rpc-fallback-split]].
