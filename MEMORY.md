@@ -589,3 +589,44 @@ DB persistida con ciclo limpio del 2026-05-27/28 (98 buys + 97 sells, zero stuck
 **Pendientes de v13.x previos que siguen abiertos**:
 - Sweeper TTL en vivo (≥6h uptime continuous) — sigue pendiente confirmar primer sweep summary.
 - Investigar correlación SOR side-fetches ↔ watcher cascades.
+
+## Session 2026-06-14 — v13.21 RPC fallback split (WIP huérfano rescatado + commiteado)
+
+### Contexto
+
+Al cargar el contexto vivo, se encontró una discrepancia: el último resumen (2026-05-28→29) cerraba "repo limpio, pusheado", pero `git status` mostraba **16 archivos modificados sin commitear**. Era una sesión posterior **nunca documentada** (sin commit, sin MEMORY.md, sin SilverBullet) que quedó ~2 semanas en el working tree. Reconstruido el cambio desde el código + un comentario en `rpc.js`.
+
+### ⚠️ Gap de forensics — el outage NO está documentado
+
+El cambio v13.21 está motivado por un **outage de Infura el 2026-06-01 (~7h)**, pero ese es **todo** el detalle que existe en cualquier lado — un one-liner en `rpc.js:23`. Agustin lo encontró en logs (no fue una pelea de >2 intentos, por eso no va a ERRORS.md). No hay forensics del incidente: no se sabe si el daemon quedó caído las 7h, si se perdieron posiciones, ni si fue Infura down total vs rate-limit. **Si surge el detalle, capturarlo retroactivamente.**
+
+### Cambio v13.21 (commit `4b76fb2`, pusheado)
+
+Split del transporte RPC único en **dos clientes** en `src/core/rpc.js`:
+- `publicClient` (discovery / watchers / snapshots / price quotes): `primary + RPC_URL_FALLBACK` solamente. **Nunca** toca el RPC público → el polling constante de discovery no quema el rate-limit budget del público.
+- `swapPublicClient` (executor, adapters, sniper sell-retry, watchdog, dailyCleanup, nonceManager, permit2, waitForAllowance): `primary + RPC_URL_FALLBACK + RPC_URL_SWAP_FALLBACK`. Un swap puede aterrizar aunque Infura degrade, con el RPC público como **last resort estricto** (viem fallback default `rank:false`, solo avanza en fallo).
+
+Detalles:
+- `buildTransport(urls)` parametrizado + `dedupe()`. 14 archivos de swap-path re-importan `swapPublicClient as publicClient`. 7 archivos de discovery quedan en `publicClient`.
+- `swapFallback` es `optional()` → si queda vacío, `swapPublicClient` === `publicClient` (backward-compatible, cero cambio).
+- Efecto colateral menor: `checkBondingCurve` (safety Virtuals) ahora lee vía `swapPublicClient` porque reusa los `quote*` del adapter virtuals; `simulateRoundtrip` (safety V2/V3/V4) sigue en discovery `publicClient`. Inofensivo (read-only), inconsistencia de clasificación no corregida.
+- Tests 297/297.
+
+### Fix del `.env.example` (parte de este commit)
+
+El example original ponía el **mismo nodo público en los dos fallbacks** (`RPC_URL_FALLBACK` Y `RPC_URL_SWAP_FALLBACK` = publicnode). Eso (a) metía discovery en el público —rompiendo la premisa del split— y (b) `dedupe` colapsaba el swap client al de discovery, anulando el feature. Corregido: `RPC_URL_FALLBACK=` vacío, público solo en `RPC_URL_SWAP_FALLBACK`, + comentario inline documentando cada knob.
+
+**Acción requerida en `.env` real:** agregar `RPC_URL_SWAP_FALLBACK=https://base-rpc.publicnode.com` y vaciar el público de `RPC_URL_FALLBACK`. Sin esto el bot corre igual pero v13.21 no hace nada.
+
+### Nuevas env vars
+
+- `RPC_URL_SWAP_FALLBACK` — fallback solo-swap. Slot seguro para RPC público.
+- `RPC_URL_FALLBACK` — ahora explícitamente "todo cliente"; usar vacío o backup PAGO.
+
+### Pickup point
+
+Repo pusheado al main (`4b76fb2`). DB persistida. Daemon parado. Tests 297/297. SilverBullet actualizado a v13.21 ([[decisions/2026-06-14-v13.21-rpc-fallback-split]]).
+
+**Pendiente inmediato:** Agustin va a correr el daemon esta noche (real, fondos reales) — primera corrida con v13.21. Antes debe editar su `.env` real con el nuevo knob. Sugerido: `npm run dry-run` para verificar boot limpio antes del `npm start`.
+
+**Gap abierto:** forensics del outage 2026-06-01 (ver arriba).
