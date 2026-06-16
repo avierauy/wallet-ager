@@ -704,4 +704,32 @@ Approach A elegido (skip en fire-time). `fireOneSniperBuy` (sniper.js) ahora, an
 - **Pendiente validación en vivo**: que los 840 "exceeds balance" caigan a ~0 en la próxima corrida.
 
 ### Próximo: #2 (fanout dispara antes de rutear)
-Arrancado el diseño al cierre de esta sesión. Matiz importante descubierto: el V4 poller SÍ gatea (fire tras "pool became tradeable"), pero el path de ejecución clanker (clanker-api → fallback UR) usa otra fuente de routing que aún no rutea → no-route. v13.23 ya elimina 840/1510 de los pre-sim reverts (los de balance); queda la cola de ~670 slippage + el UR que no rutea clankers frescos.
+Arrancado el diseño al cierre de esta sesión. Matiz importante descubierto: el V4 poller SÍ gatea (fire tras "pool became tradeable"), pero el path de ejecución clanker (clanker-api → fallback UR) usa otra fuente de routing que aún no rutea → no-route. v13.23 ya elimina 840/1510 de los pre-sim reverts (los de balance); queda la cola de ~670 slippage + el UR que no rutea clankers frescos. **#2 se decidió validar primero (opción C)** y no se implementó — pendiente medir el residual real post-v13.23 en la próxima corrida.
+
+## Session 2026-06-15/16 — root-cause de los sells en ~0 ETH + v13.24 anti-rug supply-concentration
+
+### Investigación forense (3 tx ejemplo de Agustin + distribución de 24 round-trips)
+Agustin reportó SELLs que salen con ~0 ETH. Trazado on-chain (decodificación de receipts + reconstrucción del pool):
+- **NO es tax** (`sold/bought = 1.0000`, el token transfiere el 100%), **NO es honeypot** (swaps `status: success`), **NO es slippage** (el `amount_out_min=0` de la DB es hardcodeado en `executor.js:213`, no el minOut real).
+- **Es snipe-and-dump de launch**: un **sweeper en el bloque del launch** (deployer / bot MEV bundleado) compra **~99% de la supply al floor por ~nada**, deja que entren los compradores (nosotros, +7 bloques tarde), y **dumpea toda la bolsa ~24s después** → drena el WETH del pool → nuestro sell programado recupera dust. Trazado RIP: sweeper=dumper=`0x1af9109c` (EOA), 99.01%, mismo bloque del launch.
+- **Distribución bimodal** (24 round-trips): ~21% pérdida total (rugs), ~79% recupera parcial (10-98%), agregado **41% recuperado / 59% perdido**. Montos diminutos (~0.0005 ETH/buy — footprint, no profit).
+
+### v13.24 — filtro anti-rug por concentración de supply (commit `11ee75d`, pusheado)
+- `src/safety/supplyConcentration.js` (NUEVO): `maxEOAHolderFraction` reconstruye balances netos desde el mint y devuelve la fracción de supply del **mayor holder EOA**. **Source-agnóstico**: los venues de liquidez (V4 PoolManager, curva de Virtuals, pairs V2/V3, conduits de Clanker) son **todos contratos** → restringir a EOAs los excluye solos, sin hardcodear venues. Cubre clanker/doppler/virtuals/uniswap de una.
+- `src/orchestrator/sniper.js`: check **per-discovery** (1 vez por token, no N por fanout) en `tryFireSniperBuy`, tras reservar (race-safe); si trip libera todas las reservas y skipea el fanout. **Fail-open** ante error RPC.
+- `SNIPER_MAX_SUPPLY_CONCENTRATION_PCT` default **51** (block cualquier majority holder). Validado: rugs ~99%, recuperables ≤77%.
+- Evolución del diseño en la sesión: primero excluía solo el V4 PoolManager y scopeaba a clanker (v1) → Agustin pidió cubrir cualquier source del sniper → rediseño a EOA-based source-agnóstico. Tests 316/316.
+
+### ⚠️ Limitación registrada (no es la solución óptima — pedido explícito de Agustin)
+El filtro EOA funciona porque los sweepers confirmados auto-snipean desde **EOAs**. Un deploy que barre vía **contrato** (Gnosis Safe / ERC-4337 / bot custom) es indistinguible de un venue (también contrato) y **se cuela**. Documentado en `supplyConcentration.js`. **Fix definitivo**: identificar positivamente el venue real por source (V4 PoolManager / curva Virtuals / pair V2-V3) para medir concentración en CUALQUIER holder no-venue, EOA o contrato. Follow-up.
+
+### Virtuals — nunca se compra (follow-up/info, NO se implementa monto per-source)
+- DB: `virtuals/buy: 450 skipped, 0 submitted` (jamás compramos un Virtuals).
+- **Causa**: pre-flight A en `virtuals.js:39` — `MIN_ETH_FOR_VIRTUALS_WEI = 0.0015 ETH`. La curva cotiza en VIRTUAL; el flujo hace ETH→VIRTUAL (Uniswap) → VIRTUAL→agent (curva). La curva no fire si el VIRTUAL queda < dust (0.001 VIRTUAL). 0.0015 ETH es **nuestro floor calibrado** (~$5) para que tras el hop sobre VIRTUAL > dust. El monto del snipe (~0.0008 ETH, tuneado para clanker) cae debajo → siempre skip. **Es nuestro número** (motivado por mecánica real de la plataforma), no un hard-requirement de Virtuals.
+- v13.24 **ya protege Virtuals estructuralmente** (cuando se habilite). Habilitarlo requiere monto per-source ≥0.0015 o fondear VIRTUAL — **decidido NO hacerlo ahora**.
+
+### ⚠️ Heads-up: `.env.example` con RPC público en fallback global
+En el working tree, `.env.example` tiene `RPC_URL_FALLBACK=https://base.llamarpc.com` (público en el fallback **global**) — **contradice v13.21** (discovery quemaría el rate-limit del público). NO commiteado con v13.24. Pendiente: Agustin confirmar si es intencional o revertir a vacío.
+
+### Pickup point
+Repo pusheado: `11ee75d` (v13.24). Tests 316/316. Daemon parado. Pendientes: (1) validar v13.24 + v13.23 en vivo (que caigan los sells en ~0 y los "exceeds balance"); (2) resolver el `.env.example` RPC público; (3) follow-ups: fix definitivo de concentración (venue id por source), path de compra Virtuals, #2 residual no-route. Ver [[decisions/2026-06-15-v13.24-supply-concentration-antirug]].
