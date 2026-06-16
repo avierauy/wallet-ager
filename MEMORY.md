@@ -670,3 +670,29 @@ Evidencia convergente:
 
 ### Pickup point
 Repo pusheado a main: `c9580f7` (v13.22). DB persistida. Tests 302/302. SilverBullet actualizado ([[decisions/2026-06-15-v13.22-no-route-notify-suppression]]) + gap de forensics del 06-01 cerrado retroactivamente en [[decisions/2026-06-14-v13.21-rpc-fallback-split]].
+
+## Session 2026-06-15 PM — corrida real broadcast (v13.22 validado in-prod) + 2 hallazgos
+
+### Contexto
+Primera corrida real con v13.22 + v13.21. Broadcast real, 117 wallets, confirmación explícita per-msg. Monitoreo en vivo (Monitor poll-loop cada 10min con detector de crash/freeze). Daemon arrancado 17:52, parado por pedido de Agustin ~01:00 (tras saturar caps + reset diario).
+
+### Salud de la corrida (`data/daemon-2026-06-15.log`, ~7h)
+- **868 trades**: 437 buys / 431 sells. **0 crashes, 0 unhandled, 0 uncaught, 0 bytes32.**
+- **La máquina NO se durmió** (7h continuas) — contraste con el 06-01. El detector de freeze del monitor nunca disparó.
+- **Daemon cicló a una 2da ventana diaria a las 00:00** (reset del daily counter → 74 buys + 68 sells nuevos). Comportamiento correcto del daemon continuo.
+- stuck-watchdog: 39 sells en la cola larga de Clanker; último scan ~1 → posiciones esencialmente limpias.
+- 3 `telegram send failed` (probable `/status` "message too long", pendiente conocido).
+- Daemon parado vía TaskStop + kill del orphan node (PID 14612 — el note "TaskStop no mata el child node" se confirmó otra vez).
+
+### ✅ v13.22 validado in-prod (contundente)
+- **1210 fallos no-route/silent SUPRIMIDOS** por v13.22; **6 reverts reales enviados** a Telegram (5 "unknown reason" + 1 "Return amount not enough").
+- Sin v13.22 habrían sido **~1146 pings ERROR de "no route found"**. Fix confirmado funcionando.
+
+### ⚠️ Dos hallazgos a mejorar (próximo trabajo)
+Atribución confirmada (timestamp+walletId): de ~1210 no-route, **1142 sniper / 68 aging**.
+
+1. **Sniper dispara buys SIN chequear balance de la wallet** (el grande). `fireOneSniperBuy` (sniper.js) samplea monto y dispara sin verificar `nativeBalance >= monto + gas`. El planner de aging SÍ capea (`planner.js:77`); el sniper NO (confirmado: cero refs a balance en sniper.js). Resultado: **840 pre-sim reverts "exceeds balance"** del clanker-api → fallback UR → no-route. Doble costo: quema RPC + cada fanout que elige wallet sin fondos es un slot que no usó una wallet con fondos (menos buys reales aterrizan). Ángulo de fondos reales: wallets que conviene refondear. **→ se empieza por acá (#1).**
+2. **Fanout dispara antes de que el pool rutee.** Los 1142 no-route del sniper son fanout sobre clankers frescos sin ruta aún (+670 pre-sim "Return amount not enough" por slippage que también caen a UR→no-route). El V4 poller debería gatear; muchos disparan demasiado temprano. Ya silenciado por v13.22 pero sigue siendo RPC desperdiciado.
+
+### Pickup point
+Daemon parado, sin zombies. DB persistida con el ciclo. v13.22 validado. Próximo trabajo arrancado en esta sesión: diseño del **#1** (sniper balance pre-check). Ver [[decisions/2026-06-15-v13.22-no-route-notify-suppression]] (nota de validación in-prod agregada).
