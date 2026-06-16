@@ -12,6 +12,7 @@ import { config } from "../config.js";
 import { executeAction as defaultExecuteAction } from "../core/executor.js";
 import { swapPublicClient as defaultPublicClient } from "../core/rpc.js";
 import { notifyError } from "../notify/telegram.js";
+import { maxEOAHolderFraction } from "../safety/supplyConcentration.js";
 import { getDailyState, recordTrade } from "../strategy/dailyCounter.js";
 import { isPaused } from "../util/runtimeState.js";
 
@@ -204,6 +205,31 @@ const fireOneSniperBuy = async ({ wallet, token, rng }) => {
   }
 };
 
+// v13.24 anti-rug: one supply-concentration check per discovery (not per fanout wallet). Returns
+// true when a single EOA already dominates supply — a launch-block sweeper's loaded bag that dumps
+// on our buy and drains the venue (validated 2026-06-15: ~99% concentration → ~0 recovery). The
+// signal is venue-agnostic (largest EOA; pools/curves/pairs are contracts), so it covers every
+// sniper source — clanker, doppler, virtuals (bonding-curve self-buy), generic uniswap — without
+// per-launchpad venue addresses. Fail-open on RPC error so a transient blip never drops a snipe.
+const isSupplyDangerouslyConcentrated = async (token) => {
+  const maxConc = config.sniper.maxSupplyConcentrationPct;
+  if (maxConc >= 100) return false;
+  try {
+    const frac = await maxEOAHolderFraction({ publicClient: deps.publicClient, tokenAddress: token.address });
+    if (frac != null && frac * 100 > maxConc) {
+      logger.info(
+        { token: token.symbol, source: token.source, concentrationPct: (frac * 100).toFixed(2), thresholdPct: maxConc },
+        "sniper: skipped launch — supply concentrated in one holder (likely snipe-and-dump)"
+      );
+      return true;
+    }
+    return false;
+  } catch (err) {
+    logger.warn({ token: token.symbol, err: err.message }, "sniper: supply-concentration check failed — proceeding (fail-open)");
+    return false;
+  }
+};
+
 // Public entry — fire-and-forget from the discovery handlers. Reads universal fanout + stagger
 // from config (v13.15: dropped per-source breakdown — cooldown already prevents cross-source
 // wallet overlap). Picks N random eligible wallets; reserves slot+cooldown for all N
@@ -241,6 +267,19 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
   for (const w of wallets) {
     sniperState.set(w.id, { lastSnipeAt: now });
     reservedSlots.set(w.id, (reservedSlots.get(w.id) ?? 0) + 1);
+  }
+
+  // v13.24 anti-rug: probe supply concentration ONCE per discovery (after reserving for race
+  // safety). On trip, release every reservation + cooldown and skip the whole fanout — no wallet
+  // wastes a buy on a loaded snipe-and-dump.
+  if (await isSupplyDangerouslyConcentrated(token)) {
+    for (const w of wallets) {
+      sniperState.delete(w.id);
+      const left = (reservedSlots.get(w.id) ?? 1) - 1;
+      if (left <= 0) reservedSlots.delete(w.id); else reservedSlots.set(w.id, left);
+    }
+    inc("sniper", { outcome: "skip-supply-concentration" });
+    return { skipped: "supply-concentration" };
   }
 
   // Backwards-compat: single wallet + no stagger → fire synchronously, same return shape as before.

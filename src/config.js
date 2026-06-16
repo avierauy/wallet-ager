@@ -106,5 +106,12 @@ export const config = {
   sniper: {
     fanout:    positiveInt(optional("SNIPER_FANOUT", "1"), "SNIPER_FANOUT"),
     staggerMs: parseStaggerRange(optional("SNIPER_FANOUT_STAGGER_MS", "0-0"), "SNIPER_FANOUT_STAGGER_MS"),
+    // v13.24 anti-rug: skip a launch snipe when a single EOA already holds more than this % of
+    // supply at buy-time. The launch-block sweeper (deployer/MEV bot) loads the bag then dumps on
+    // our buy, draining the venue. Validated 2026-06-15: total rugs concentrate ~99% in one EOA;
+    // partial-recover snipes ran up to 77% (those are also skipped at the 51 default — i.e. block
+    // any majority holder). Venue-agnostic (pools/curves/pairs are contracts) → applies to every
+    // sniper source incl. Virtuals bonding-curve self-buys. Set to 100+ to disable.
+    maxSupplyConcentrationPct: Number(optional("SNIPER_MAX_SUPPLY_CONCENTRATION_PCT", "51")),
   },
 };

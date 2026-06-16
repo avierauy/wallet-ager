@@ -64,6 +64,26 @@ const seededRng = (seed) => {
   };
 };
 
+// v13.24 helpers: a funded publicClient that also answers the supply-concentration probe.
+const POOL = "0x498581fF718922c3f8e6A244956aF099B2652b2b"; // matches config base.json v4PoolManager
+const ZERO40 = "0x0000000000000000000000000000000000000000";
+const HOLDER_A = "0x00000000000000000000000000000000000000aa";
+const HOLDER_B = "0x00000000000000000000000000000000000000bb";
+const tev = (blk, from, to, value) => ({ blockNumber: BigInt(blk), args: { from, to, value: BigInt(value) } });
+const concClient = (transfers, supply = 100n, head = 12n) => ({
+  getBalance: async () => 10n ** 18n,
+  getBlockNumber: async () => head,
+  readContract: async () => supply,
+  getLogs: async ({ args, fromBlock, toBlock }) => {
+    let evs = transfers.filter((t) => t.blockNumber >= fromBlock && t.blockNumber <= toBlock);
+    if (args && args.from) evs = evs.filter((t) => t.args.from.toLowerCase() === args.from.toLowerCase());
+    return evs;
+  },
+  // POOL is the venue (a contract); the holder addresses are EOAs.
+  getBytecode: async ({ address }) => (address.toLowerCase() === POOL.toLowerCase() ? "0x60806040" : "0x"),
+});
+const CLANKER_TOKEN = { address: "0x07f6F57526A91d999496bc81f054cA1b4Adb5b07", symbol: "RIP", decimals: 18, tradeableOn: ["uniswap"], source: "clanker-v4" };
+
 describe("sniper", () => {
   // Default: a funded wallet (1 ETH) so the v13.23 balance gate passes; tests that need an
   // underfunded wallet override publicClient.getBalance via _setDeps.
@@ -98,6 +118,50 @@ describe("sniper", () => {
     _setDeps({ executeAction: exec.fn, publicClient: { getBalance: async () => 10n ** 18n } });
     const result = await tryFireSniperBuy({ token: TOKEN });
     assert.equal(exec.calls.length, 1, "an affordable snipe must reach the executor");
+    assert.equal(result.fired, true);
+  });
+
+  test("v13.24: skips clanker snipe when supply is concentrated in one holder (>threshold)", async () => {
+    initSniper([makeWallet("a")]);
+    const exec = mockExecutor();
+    const transfers = [tev(10, ZERO40, POOL, 100), tev(11, POOL, HOLDER_A, 99)]; // 99% swept
+    _setDeps({ executeAction: exec.fn, publicClient: concClient(transfers) });
+    const result = await tryFireSniperBuy({ token: CLANKER_TOKEN });
+    assert.equal(result.skipped, "supply-concentration");
+    assert.equal(exec.calls.length, 0, "a loaded snipe-and-dump must not reach the executor");
+  });
+
+  test("v13.24: fires clanker snipe when supply is distributed (below threshold)", async () => {
+    initSniper([makeWallet("a")]);
+    const exec = mockExecutor(["submitted"]);
+    const transfers = [tev(10, ZERO40, POOL, 100), tev(11, POOL, HOLDER_A, 5), tev(11, POOL, HOLDER_B, 7)];
+    _setDeps({ executeAction: exec.fn, publicClient: concClient(transfers) });
+    const result = await tryFireSniperBuy({ token: CLANKER_TOKEN });
+    assert.equal(exec.calls.length, 1, "a healthy launch must reach the executor");
+    assert.equal(result.fired, true);
+  });
+
+  test("v13.24: applies to any source — a concentrated non-clanker launch is also skipped", async () => {
+    initSniper([makeWallet("a")]);
+    const exec = mockExecutor();
+    const transfers = [tev(10, ZERO40, POOL, 100), tev(11, POOL, HOLDER_A, 99)]; // 99% swept
+    _setDeps({ executeAction: exec.fn, publicClient: concClient(transfers) });
+    const result = await tryFireSniperBuy({ token: { ...CLANKER_TOKEN, source: "uniswap-v4-fee3000" } });
+    assert.equal(result.skipped, "supply-concentration", "the check is venue/source-agnostic");
+    assert.equal(exec.calls.length, 0);
+  });
+
+  test("v13.24: fails open — a concentration RPC error does not drop the snipe", async () => {
+    initSniper([makeWallet("a")]);
+    const exec = mockExecutor(["submitted"]);
+    _setDeps({ executeAction: exec.fn, publicClient: {
+      getBalance: async () => 10n ** 18n,
+      getBlockNumber: async () => { throw new Error("rpc down"); },
+      readContract: async () => { throw new Error("rpc down"); },
+      getLogs: async () => { throw new Error("rpc down"); },
+    } });
+    const result = await tryFireSniperBuy({ token: CLANKER_TOKEN });
+    assert.equal(exec.calls.length, 1, "fail-open must still fire the snipe");
     assert.equal(result.fired, true);
   });
 

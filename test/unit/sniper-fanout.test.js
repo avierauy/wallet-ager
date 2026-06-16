@@ -60,9 +60,29 @@ const UNI_TOKEN = {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// v13.24: publicClient that funds wallets AND answers the supply-concentration probe.
+const POOL = "0x498581fF718922c3f8e6A244956aF099B2652b2b"; // config base.json v4PoolManager
+const ZERO40 = "0x0000000000000000000000000000000000000000";
+const tev = (blk, from, to, value) => ({ blockNumber: BigInt(blk), args: { from, to, value: BigInt(value) } });
+const probeClient = (transfers, counter) => ({
+  getBalance: async () => 10n ** 18n,
+  getBlockNumber: async () => 12n,
+  readContract: async () => { if (counter) counter.n++; return 100n; },
+  getLogs: async ({ args, fromBlock, toBlock }) => {
+    let evs = transfers.filter((t) => t.blockNumber >= fromBlock && t.blockNumber <= toBlock);
+    if (args && args.from) evs = evs.filter((t) => t.args.from.toLowerCase() === args.from.toLowerCase());
+    return evs;
+  },
+  // POOL is the venue (a contract); holder addresses are EOAs.
+  getBytecode: async ({ address }) => (address.toLowerCase() === POOL.toLowerCase() ? "0x60806040" : "0x"),
+});
+const DISTRIBUTED = [tev(10, ZERO40, POOL, 100), tev(11, POOL, "0x00000000000000000000000000000000000000aa", 5)];
+const CONCENTRATED = [tev(10, ZERO40, POOL, 100), tev(11, POOL, "0x00000000000000000000000000000000000000aa", 99)];
+
 describe("sniper fanout (v13.15 — universal config)", () => {
-  // Default: funded wallets (1 ETH) so the v13.23 sniper balance gate passes for every fanout fire.
-  beforeEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); _setDeps({ publicClient: { getBalance: async () => 10n ** 18n } }); });
+  // Default: funded wallets + distributed supply so the v13.23 balance gate and the v13.24
+  // concentration probe both pass for every fanout fire.
+  beforeEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); _setDeps({ publicClient: probeClient(DISTRIBUTED) }); });
   afterEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); });
 
   test("picks N=3 distinct wallets for a clanker discovery and schedules staggered fires", async () => {
@@ -83,6 +103,20 @@ describe("sniper fanout (v13.15 — universal config)", () => {
     assert.equal(exec.calls.length, 3, "all 3 fires executed");
     const calledIds = new Set(exec.calls.map((c) => c.walletId));
     assert.deepEqual(calledIds, ids, "executor called for exactly the scheduled wallets");
+  });
+
+  test("v13.24: one concentration check per discovery skips the whole fanout (not N checks)", async () => {
+    initSniper([makeWallet("w1"), makeWallet("w2"), makeWallet("w3"), makeWallet("w4")]);
+    const exec = mockExecutor();
+    const counter = { n: 0 };
+    _setDeps({ executeAction: exec.fn, publicClient: probeClient(CONCENTRATED, counter) });
+
+    const result = await tryFireSniperBuy({ token: CLANKER_TOKEN }); // fanout=3, supply 99% concentrated
+
+    assert.equal(result.skipped, "supply-concentration", "the whole fanout is skipped");
+    await wait(150);
+    assert.equal(exec.calls.length, 0, "no wallet fires on a loaded snipe-and-dump");
+    assert.equal(counter.n, 1, "supply probed exactly once per discovery, not once per fanout wallet");
   });
 
   test("same N applies regardless of source (clanker, doppler, uniswap, virtuals)", async () => {
