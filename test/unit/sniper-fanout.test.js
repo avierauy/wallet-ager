@@ -61,7 +61,8 @@ const UNI_TOKEN = {
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 describe("sniper fanout (v13.15 — universal config)", () => {
-  beforeEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); });
+  // Default: funded wallets (1 ETH) so the v13.23 sniper balance gate passes for every fanout fire.
+  beforeEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); _setDeps({ publicClient: { getBalance: async () => 10n ** 18n } }); });
   afterEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); });
 
   test("picks N=3 distinct wallets for a clanker discovery and schedules staggered fires", async () => {

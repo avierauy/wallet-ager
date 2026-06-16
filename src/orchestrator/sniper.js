@@ -143,13 +143,32 @@ const fireOneSniperBuy = async ({ wallet, token, rng }) => {
     gasMultiplier: 1.2,
   };
 
-  logger.info(
-    { walletId: wallet.id, token: token.symbol, amountInWei: amountInWei.toString(), source: "sniper-fresh" },
-    "sniper: firing buy"
-  );
-  inc("sniper", { outcome: "fire-attempt" });
-
   try {
+    // v13.23: don't fire on a wallet that can't afford this snipe. The aging planner caps the
+    // buy by usable balance (planner.js:77); the sniper used to fire blind, so an underfunded
+    // wallet burned a clanker-api pre-sim + UR fallback only to fail "exceeds balance" / "no
+    // route" (840 such reverts in the 2026-06-15 cycle). Bail before any adapter call.
+    // minNativeBalanceWei is the same gas floor the planner reserves. A getBalance throw falls
+    // through to the catch below, which also skips the fire.
+    const minNative = BigInt(wallet.profile.minNativeBalanceWei ?? "0");
+    const balanceWei = await deps.publicClient.getBalance({ address: wallet.account.address });
+    if (amountInWei > balanceWei - minNative) {
+      sniperState.delete(wallet.id); // free the wallet for the next launch (mirror skip path)
+      inc("sniper", { outcome: "skip-insufficient-balance" });
+      logger.info(
+        { walletId: wallet.id, token: token.symbol,
+          balanceWei: balanceWei.toString(), wantWei: amountInWei.toString(), minNativeWei: minNative.toString() },
+        "sniper: skipped — insufficient balance"
+      );
+      return { fired: false, walletId: wallet.id, skipped: "insufficient-balance" };
+    }
+
+    logger.info(
+      { walletId: wallet.id, token: token.symbol, amountInWei: amountInWei.toString(), source: "sniper-fresh" },
+      "sniper: firing buy"
+    );
+    inc("sniper", { outcome: "fire-attempt" });
+
     const result = await deps.executeAction({ wallet, plan });
     if (result.status === "submitted" || result.status === "dry-run") {
       recordTrade({ wallet });

@@ -65,7 +65,9 @@ const seededRng = (seed) => {
 };
 
 describe("sniper", () => {
-  beforeEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); });
+  // Default: a funded wallet (1 ETH) so the v13.23 balance gate passes; tests that need an
+  // underfunded wallet override publicClient.getBalance via _setDeps.
+  beforeEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); _setDeps({ publicClient: { getBalance: async () => 10n ** 18n } }); });
   afterEach(() => { _stopAll(); _resetDeps(); resetDailyCounter(); });
 
   test("skipped when no wallets initialized", async () => {
@@ -77,6 +79,26 @@ describe("sniper", () => {
     initSniper([makeWallet("a", { sniper: { enabled: false } })]);
     const result = await tryFireSniperBuy({ token: TOKEN });
     assert.equal(result.skipped, "no-eligible-wallet");
+  });
+
+  test("v13.23: skips fire when wallet can't afford the snipe (balance - minNative < amount)", async () => {
+    initSniper([makeWallet("a")]);
+    const exec = mockExecutor();
+    // balance == minNativeBalanceWei → usable 0 → any positive snipe amount is unaffordable.
+    _setDeps({ executeAction: exec.fn, publicClient: { getBalance: async () => 5000000000000000n } });
+    const result = await tryFireSniperBuy({ token: TOKEN });
+    assert.equal(result.skipped, "insufficient-balance");
+    assert.equal(exec.calls.length, 0, "executor must not be called for an unaffordable snipe");
+  });
+
+  test("v13.23: fires when wallet has enough for amount + gas reserve", async () => {
+    initSniper([makeWallet("a")]);
+    const exec = mockExecutor(["submitted"]);
+    // 1 ETH balance, amount ≤ 0.002, minNative 0.005 → comfortably affordable.
+    _setDeps({ executeAction: exec.fn, publicClient: { getBalance: async () => 10n ** 18n } });
+    const result = await tryFireSniperBuy({ token: TOKEN });
+    assert.equal(exec.calls.length, 1, "an affordable snipe must reach the executor");
+    assert.equal(result.fired, true);
   });
 
   test("skipped when wallets are outside active hours", async () => {
