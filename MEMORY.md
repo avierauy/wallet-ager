@@ -696,3 +696,12 @@ Atribución confirmada (timestamp+walletId): de ~1210 no-route, **1142 sniper / 
 
 ### Pickup point
 Daemon parado, sin zombies. DB persistida con el ciclo. v13.22 validado. Próximo trabajo arrancado en esta sesión: diseño del **#1** (sniper balance pre-check). Ver [[decisions/2026-06-15-v13.22-no-route-notify-suppression]] (nota de validación in-prod agregada).
+
+### v13.23 — sniper balance pre-check (#1 implementado, commit `7c8fd8e`)
+Approach A elegido (skip en fire-time). `fireOneSniperBuy` (sniper.js) ahora, antes de cualquier adapter call: `getBalance` → `usable = balance − profile.minNativeBalanceWei` → si `amountInWei > usable` skip (`skip-insufficient-balance`, libera slot+cooldown, no consume cap). El log/metric "firing buy" se movió después del gate. Una `getBalance` reemplaza el cascade fallido (clanker-api pre-sim + UR) → net menos RPC. minNativeBalanceWei reusa el floor del planner aging; Agustin confirmó que está seteado (>0) en wallets.json real.
+- Tests: mock `getBalance` (1 ETH) en beforeEach de sniper.test.js + sniper-fanout.test.js (merge via `_setDeps`), +2 tests (skip/fire). **304/304**.
+- Rechazado: B (cap como planner — genera dust), C (eligibility pick-time — async/staleness). Detalle en [[decisions/2026-06-15-v13.23-sniper-balance-precheck]].
+- **Pendiente validación en vivo**: que los 840 "exceeds balance" caigan a ~0 en la próxima corrida.
+
+### Próximo: #2 (fanout dispara antes de rutear)
+Arrancado el diseño al cierre de esta sesión. Matiz importante descubierto: el V4 poller SÍ gatea (fire tras "pool became tradeable"), pero el path de ejecución clanker (clanker-api → fallback UR) usa otra fuente de routing que aún no rutea → no-route. v13.23 ya elimina 840/1510 de los pre-sim reverts (los de balance); queda la cola de ~670 slippage + el UR que no rutea clankers frescos.
