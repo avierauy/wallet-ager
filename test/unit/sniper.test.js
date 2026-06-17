@@ -104,11 +104,35 @@ describe("sniper", () => {
   test("v13.23: skips fire when wallet can't afford the snipe (balance - minNative < amount)", async () => {
     initSniper([makeWallet("a")]);
     const exec = mockExecutor();
-    // balance == minNativeBalanceWei → usable 0 → any positive snipe amount is unaffordable.
-    _setDeps({ executeAction: exec.fn, publicClient: { getBalance: async () => 5000000000000000n } });
+    // 0.0055 ETH: above minNative (0.005) so it PASSES the v13.25 pick-time filter, but usable
+    // (0.0005) is below the snipe amount (0.001-0.002) so the v13.23 fire-time gate skips it.
+    _setDeps({ executeAction: exec.fn, publicClient: { getBalance: async () => 5500000000000000n } });
     const result = await tryFireSniperBuy({ token: TOKEN });
     assert.equal(result.skipped, "insufficient-balance");
     assert.equal(exec.calls.length, 0, "executor must not be called for an unaffordable snipe");
+  });
+
+  test("v13.25: unfunded virgin wallet (balance <= minNative) is never picked", async () => {
+    initSniper([makeWallet("a")]);
+    const exec = mockExecutor();
+    // balance == minNativeBalanceWei → not > floor → excluded at pick time, never reaches fire.
+    _setDeps({ executeAction: exec.fn, publicClient: { getBalance: async () => 5000000000000000n } });
+    const result = await tryFireSniperBuy({ token: TOKEN });
+    assert.equal(result.skipped, "no-eligible-wallet", "virgin filtered at pick, not fire");
+    assert.equal(exec.calls.length, 0);
+  });
+
+  test("v13.25: a wallet funded just now becomes pickable immediately (live balance, no cache)", async () => {
+    initSniper([makeWallet("a")]);
+    const exec = mockExecutor(["submitted"]);
+    let bal = 0n; // starts virgin
+    _setDeps({ executeAction: exec.fn, publicClient: { getBalance: async () => bal } });
+    const r1 = await tryFireSniperBuy({ token: TOKEN });
+    assert.equal(r1.skipped, "no-eligible-wallet", "virgin not picked");
+    bal = 10n ** 18n; // funded between discoveries
+    const r2 = await tryFireSniperBuy({ token: TOKEN });
+    assert.equal(r2.fired, true, "picked up on the very next discovery — no stale cache");
+    assert.equal(exec.calls.length, 1);
   });
 
   test("v13.23: fires when wallet has enough for amount + gas reserve", async () => {

@@ -90,9 +90,25 @@ const isEligible = (wallet, nowMs) => {
   return true;
 };
 
-const pickWallet = (rng) => {
+// Balance-aware eligibility for fanout picking (v13.25). Beyond the sync gates (enabled /
+// active-hours / cooldown / daily-cap), a LIVE getBalance is taken at pick time so that
+// (a) unfunded "virgin" wallets are never picked — they'd just waste a fanout slot (the fire-time
+// v13.23 gate would skip them anyway), and (b) a wallet funded at ANY instant becomes pickable on
+// the very next discovery — balances are dynamic, so no cache that could go stale. Fail-open per
+// wallet on RPC error (the fire-time gate is the exact net). minNativeBalanceWei is the coarse
+// floor here; the exact amount+gas affordability check stays at fire time.
+const eligibleFundedWallets = async () => {
   const now = Date.now();
-  const eligible = walletsRef.filter((w) => isEligible(w, now));
+  const sync = walletsRef.filter((w) => isEligible(w, now));
+  if (sync.length === 0) return [];
+  const balances = await Promise.all(
+    sync.map((w) => deps.publicClient.getBalance({ address: w.account.address }).catch(() => null))
+  );
+  return sync.filter((w, i) => balances[i] == null || balances[i] > BigInt(w.profile.minNativeBalanceWei ?? "0"));
+};
+
+const pickWallet = async (rng) => {
+  const eligible = await eligibleFundedWallets();
   if (eligible.length === 0) return null;
   return eligible[Math.floor(rng() * eligible.length)];
 };
@@ -100,13 +116,12 @@ const pickWallet = (rng) => {
 // Multi-wallet pick for fanout. Single-wallet path delegates to pickWallet to preserve the
 // exact rng-consumption pattern existing tests depend on (one rng() call → one wallet index).
 // Multi-wallet uses Fisher-Yates so the chosen subset is uniformly random without replacement.
-const pickWalletsRandom = (rng, n) => {
+const pickWalletsRandom = async (rng, n) => {
   if (n <= 1) {
-    const w = pickWallet(rng);
+    const w = await pickWallet(rng);
     return w ? [w] : [];
   }
-  const now = Date.now();
-  const eligible = walletsRef.filter((w) => isEligible(w, now));
+  const eligible = await eligibleFundedWallets();
   if (eligible.length === 0) return [];
   const shuffled = [...eligible];
   for (let i = shuffled.length - 1; i > 0; i--) {
@@ -114,6 +129,17 @@ const pickWalletsRandom = (rng, n) => {
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
   }
   return shuffled.slice(0, Math.min(n, shuffled.length));
+};
+
+// Serializes the pick→reserve section across concurrent discoveries. The balance check inside the
+// pick (v13.25) is async, which would otherwise let two simultaneous discoveries pick from the same
+// not-yet-reserved pool and double-spend slots. This lock makes pick+reserve atomic again (restores
+// the v13.13 fanout race protection) while still allowing a live balance fetch.
+let pickChain = Promise.resolve();
+const withPickLock = (fn) => {
+  const result = pickChain.then(fn, fn);
+  pickChain = result.then(() => undefined, () => undefined);
+  return result;
 };
 
 const computeStaggerDelay = ([minMs, maxMs], rng) => {
@@ -254,19 +280,22 @@ export const tryFireSniperBuy = async ({ token, rng = Math.random }) => {
   const fanoutN = config.sniper.fanout;
   const staggerRange = config.sniper.staggerMs;
 
-  const wallets = pickWalletsRandom(rng, fanoutN);
+  // Pick (with a live balance fetch) + reserve, atomically against concurrent discoveries. The lock
+  // serializes this section so a simultaneous discovery for another token sees these wallets as
+  // already reserved (cap-wise) and in cooldown (sniperState-wise) and picks others.
+  const wallets = await withPickLock(async () => {
+    const picked = await pickWalletsRandom(rng, fanoutN);
+    const nowPick = Date.now();
+    const eligible = picked.filter((w) => isEligible(w, nowPick)); // cheap re-check (cap may have moved)
+    for (const w of eligible) {
+      sniperState.set(w.id, { lastSnipeAt: nowPick });
+      reservedSlots.set(w.id, (reservedSlots.get(w.id) ?? 0) + 1);
+    }
+    return eligible;
+  });
   if (wallets.length === 0) {
     inc("sniper", { outcome: "no-eligible-wallet" });
     return { skipped: "no-eligible-wallet" };
-  }
-
-  // Reserve slot + cooldown for ALL picked wallets immediately. This is the race protection:
-  // a concurrent tryFireSniperBuy for a different token must see these wallets as already
-  // reserved (cap-wise) and in cooldown (sniperState-wise), so it picks others.
-  const now = Date.now();
-  for (const w of wallets) {
-    sniperState.set(w.id, { lastSnipeAt: now });
-    reservedSlots.set(w.id, (reservedSlots.get(w.id) ?? 0) + 1);
   }
 
   // v13.24 anti-rug: probe supply concentration ONCE per discovery (after reserving for race
