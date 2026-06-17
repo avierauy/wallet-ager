@@ -732,4 +732,33 @@ El filtro EOA funciona porque los sweepers confirmados auto-snipean desde **EOAs
 En el working tree, `.env.example` tiene `RPC_URL_FALLBACK=https://base.llamarpc.com` (público en el fallback **global**) — **contradice v13.21** (discovery quemaría el rate-limit del público). NO commiteado con v13.24. Pendiente: Agustin confirmar si es intencional o revertir a vacío.
 
 ### Pickup point
-Repo pusheado: `11ee75d` (v13.24). Tests 316/316. Daemon parado. Pendientes: (1) validar v13.24 + v13.23 en vivo (que caigan los sells en ~0 y los "exceeds balance"); (2) resolver el `.env.example` RPC público; (3) follow-ups: fix definitivo de concentración (venue id por source), path de compra Virtuals, #2 residual no-route. Ver [[decisions/2026-06-15-v13.24-supply-concentration-antirug]].
+Repo pusheado: `11ee75d` (v13.24) + `44133f8` (.env.example knob). Tests 316/316. Pendientes: (1) validar v13.24 + v13.23 en vivo; (2) `.env.example` RPC público (resuelto — revertido a vacío en `44133f8`); (3) follow-ups. Ver [[decisions/2026-06-15-v13.24-supply-concentration-antirug]].
+
+## Session 2026-06-16 — validación in-prod de v13.22/23/24 (corrida real ~4h) + hallazgo virgin wallets
+
+### Los 3 filtros validados con fondos reales (corrida 16:14→20:17, daemon `bjo1ru8at`)
+| Filtro | Métrica | Resultado |
+|---|---|---|
+| **v13.24** anti-rug | skipRug / fail-open | **18 rugs skipeados / 0 fail-open** |
+| **v13.23** balance gate | clanker-api "exceeds balance" | **0** (eran **840** el 06-15) |
+| **v13.22** no-route notify | a Telegram / suprimidos | **2 enviados / 67 suprimidos** |
+| Salud | crashes/unhandled/bytes32 | **0**, máquina no durmió |
+
+**Validación decisiva v13.24** (distribución de recovery, muestra 20 round-trips):
+- 06-16: `<1% (RUG)` = **0** (eran ~21% el 06-15). Agregado recuperado **50%** (vs ~41%). **La cola de sells en ~0 ETH desapareció.**
+- 185 buys / 181 sells.
+
+### Hallazgo — `skipBal=1050` NO es depleción, son **virgin wallets nunca fondeadas**
+On-chain (nonce + balance de las 117, derivadas de `wallets.json` sin exponer claves):
+- **37 VIRGIN** (nonce=0, jamás broadcastearon), **todas con 0 ETH** (nunca fondeadas). Son exactamente las 37 bajo el min de snipe.
+- **80 ACTIVE** (nonce>0), con **18.65 ETH total** (~0.23 c/u, sobрадas).
+- El `skipBal` es el sniper disparándoles a esas 37 en cada launch y v13.23 skipeándolas. No es que el pool se agotó.
+- **Implicación**: `isEligible` no mira balance → el fanout pickea las 37 virgin igual y las skipea en fire-time → **desperdician pick-slots** (menos buys reales por fanout). Es el caso de "approach C" (filtro de balance en pick-time) que quedó pendiente desde v13.23.
+
+### Opciones para las virgin (sin decidir aún)
+1. Fondear las 37.
+2. **Excluir wallets sin fondos del pool elegible del sniper** (approach C, pick-time) — cambio de código chico, el fanout deja de gastar slots en ellas.
+3. Dejar como está (v13.23 las maneja, solo ruido de skipBal).
+
+### Pickup point
+Daemon `bjo1ru8at` **sigue corriendo** (real broadcast, mayormente idle — 80 activas saturadas, 37 virgin skipean; retoma al reset diario 00:00). Ciclo validado, 0 crashes. SilverBullet actualizado. Próximo: opción 2 (excluir virgins en pick-time, approach C) es la mejora natural — tee'd up.
