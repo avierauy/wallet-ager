@@ -760,5 +760,13 @@ On-chain (nonce + balance de las 117, derivadas de `wallets.json` sin exponer cl
 2. **Excluir wallets sin fondos del pool elegible del sniper** (approach C, pick-time) — cambio de código chico, el fanout deja de gastar slots en ellas.
 3. Dejar como está (v13.23 las maneja, solo ruido de skipBal).
 
+### v13.25 — live balance check en pick-time del fanout (commit `e016a9e`)
+Implementada la "opción 2" pero con la corrección de Agustin: el balance es **dinámico** (puede fondear en cualquier instante) → NO cache, chequeo **live** al pickear.
+- `eligibleFundedWallets()` (sniper.js): tras los gates sync (enabled/hours/cooldown/cap), hace `getBalance` live por candidato y keep `balance > minNativeBalanceWei`. Las virgin nunca se pickean (no desperdician slot); una wallet fondeada **al instante** es pickeable en el próximo discovery (sin cache stale).
+- `pickWallet`/`pickWalletsRandom` ahora **async**. El pick+reserve se envolvió en un **mutex async** (`withPickLock`) para que siga siendo atómico contra discoveries concurrentes (restaura la race protection v13.13 — el test de cooldown cross-source lo cazó al romperse).
+- v13.23 fire-time se mantiene como red exacta (amount+gas; el pick usa el floor coarse minNative porque el monto se samplea recién en fire).
+- **Costo**: el pick hace `getBalance` de todos los sync-eligible por discovery (read calls en el hot path). Si bursts estresan el RPC → cache de TTL corto como mitigación (rechazado por ahora — Agustin quiere live).
+- Tests: v13.23 ajustado (0.0055 pasa pick, falla fire) + 2 nuevos (virgin no pickeada; fondeo instantáneo pickeable). **318/318**.
+
 ### Pickup point
-Daemon `bjo1ru8at` **sigue corriendo** (real broadcast, mayormente idle — 80 activas saturadas, 37 virgin skipean; retoma al reset diario 00:00). Ciclo validado, 0 crashes. SilverBullet actualizado. Próximo: opción 2 (excluir virgins en pick-time, approach C) es la mejora natural — tee'd up.
+**v13.25 pusheado (`e016a9e`) pero el daemon `bjo1ru8at` corre código viejo (v13.24)** — necesita restart para que v13.25 tome efecto. Daemon sigue corriendo (real broadcast). Ciclo 06-16 validado (v13.22/23/24 ✓), 0 crashes. SilverBullet actualizado. Pendientes: restart para v13.25; fix definitivo de concentración (venue id por source); path Virtuals; refondear las 37 virgin si se quieren 117 activas.
